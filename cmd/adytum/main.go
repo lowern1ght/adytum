@@ -25,6 +25,42 @@ func main() {
 	}
 }
 
+// commandHelp возвращает справку по команде.
+//
+// Справка нужна до инициализации репозитория, поэтому описание команд
+// хранится отдельно от основного списка.
+var commandHelpText = map[string]string{
+	"init":      "подготовить склонированный репозиторий: git-фильтры, .gitattributes, .sops.yaml\n               публичные ключи машин подставляются из ~/.adytum/recipients",
+	"sync":      "получить изменения, обновить рабочее дерево, отправить локальные коммиты",
+	"get":       "напечатать расшифрованный секрет\n               adytum get <project>/<service>            весь файл\n               adytum get <project>/<service>.<KEY>      одно значение\n               adytum get --json <project>/<service>     машинночитаемый вывод",
+	"set":       "отредактировать секрет в $EDITOR\n               adytum set <project>/<service>",
+	"new":       "создать новый секрет из шаблона и закоммитить его\n               adytum new <project>/<service>",
+	"run":       "выполнить команду с секретами в окружении\n               adytum run --env <project>/<service> -- <команда> [аргументы...]",
+	"unlock":    "разрешить агентским сессиям операции get и run на 8 часов",
+	"identity":  "указать, какой локальный ключ принадлежит этой машине\n               adytum identity <label>",
+	"grant":     "создать age-идентичность и выдать доступ\n               adytum grant <label>",
+	"revoke":    "отозвать доступ и перешифровать файлы\n               adytum revoke <label>",
+	"reencrypt": "перешифровать секреты по текущим правилам .sops.yaml",
+	"import":    "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
+	"status":    "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
+}
+
+// hasHelpFlag сообщает, есть ли среди аргументов флаг справки.
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// usageCommand печатает справку по одной команде.
+func usageCommand(out *os.File, command, help string) {
+	fmt.Fprintf(out, "adytum %s — %s\n\n", command, help)
+	fmt.Fprintf(out, "Использование:\n  adytum %s [аргументы]\n", command)
+}
+
 // run разбирает аргументы и выполняет команду.
 func run(args []string) error {
 	if len(args) == 0 {
@@ -41,6 +77,16 @@ func run(args []string) error {
 	case "version", "--version":
 		fmt.Println("adytum", version)
 		return nil
+	}
+
+	// Справка по конкретной команде не требует репозитория: её можно
+	// запросить до инициализации машины. Проверяем только сами флаги
+	// справки: --json и прочие аргументы команду не отменяют.
+	if hasHelpFlag(rest) {
+		if help, ok := commandHelpText[command]; ok {
+			usageCommand(os.Stdout, command, help)
+			return nil
+		}
 	}
 
 	app, err := adytum.New(adytum.Exec{})
@@ -85,17 +131,32 @@ func run(args []string) error {
 
 // runGet выполняет get <project>/<service>[.<KEY>].
 func runGet(app *adytum.App, args []string) error {
-	if len(args) == 0 {
+	jsonOutput := false
+	targets := []string{}
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "-h", "--help":
+			usageCommand(os.Stdout, "get", commandHelpText["get"])
+			return nil
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("неожиданный аргумент %q", arg)
+			}
+			targets = append(targets, arg)
+		}
+	}
+	if len(targets) == 0 {
 		return errors.New("указание: adytum get <project>/<service>[.<KEY>]")
 	}
-	target := args[0]
-	project, service, err := adytum.SplitTarget(target)
+	target := targets[0]
+	project, service, key, err := splitKey(target)
 	if err != nil {
 		return err
 	}
-	key := ""
-	if project, service, key, err = splitKey(target); err != nil {
-		return err
+	if jsonOutput {
+		return app.GetJSON(project, service, key)
 	}
 	return app.Get(project, service, key)
 }

@@ -2,6 +2,7 @@ package adytum
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -224,6 +225,45 @@ func (a *App) Get(project, service, key string) error {
 		return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
 	}
 	fmt.Println(value)
+	return nil
+}
+
+// GetJSON печатает секрет в машинночитаемом виде.
+//
+// Значение попадает в поле "value" — это ожидаемое поведение команды
+// get: вывод запрашивается явно.
+func (a *App) GetJSON(project, service, key string) error {
+	path, _, err := ResolveSecret(a.Root, project, service)
+	if err != nil {
+		return err
+	}
+	plain, err := a.readPlaintext(path)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"project": project,
+		"service": service,
+	}
+	if key == "" {
+		payload["content"] = string(plain)
+	} else {
+		entries, err := parseEntries(plain)
+		if err != nil {
+			return err
+		}
+		value, found := lookup(entries, key)
+		if !found {
+			return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
+		}
+		payload["key"] = key
+		payload["value"] = value
+	}
+	encoded, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
 	return nil
 }
 
