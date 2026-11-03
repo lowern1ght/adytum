@@ -15,6 +15,8 @@ type fakeRunner struct {
 	responses map[string]fakeResponse
 	// calls — список выполненных команд.
 	calls [][]string
+	// envs — окружения выполненных команд.
+	envs [][]string
 }
 
 // fakeResponse — ответ на команду.
@@ -26,6 +28,7 @@ type fakeResponse struct {
 // Run выполняет команду и возвращает заранее заданный ответ.
 func (f *fakeRunner) Run(cmd Command, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
+	f.envs = append(f.envs, cmd.Env)
 	joined := strings.Join(args, " ")
 	for key, response := range f.responses {
 		if strings.Contains(joined, key) {

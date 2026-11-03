@@ -37,8 +37,14 @@ func inputTypeFor(ext string) string {
 // Encrypt шифрует содержимое файла и возвращает шифротекст.
 //
 // path — путь относительно корня репозитория (например personal/git.env).
+//
+// Содержимое передаётся через stdin: sops без имени файла читает ввод
+// оттуда, а имя нужно ему только для выбора типа данных и правил
+// шифрования.
 func (s Sops) Encrypt(path string, content []byte) ([]byte, error) {
-	out, err := s.Runner.Run(s.command(path), "sops", "encrypt", "--filename-override", filepath.ToSlash(path))
+	command := s.command(path)
+	command.Stdin = content
+	out, err := s.Runner.Run(command, "sops", "encrypt", "--filename-override", filepath.ToSlash(path))
 	if err != nil {
 		return nil, fmt.Errorf("не удалось зашифровать %s: %w", path, err)
 	}
@@ -48,8 +54,13 @@ func (s Sops) Encrypt(path string, content []byte) ([]byte, error) {
 // Decrypt расшифровывает содержимое файла.
 //
 // path — путь относительно корня репозитория.
+//
+// Содержимое передаётся через stdin по той же причине, что и в
+// Encrypt: sops читает ввод оттуда.
 func (s Sops) Decrypt(path string, content []byte) ([]byte, error) {
-	out, err := s.Runner.Run(s.command(path), "sops", "decrypt", "--filename-override", filepath.ToSlash(path))
+	command := s.command(path)
+	command.Stdin = content
+	out, err := s.Runner.Run(command, "sops", "decrypt", "--filename-override", filepath.ToSlash(path))
 	if err != nil {
 		return nil, fmt.Errorf("не удалось расшифровать %s: %w", path, err)
 	}

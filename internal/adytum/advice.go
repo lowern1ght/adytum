@@ -2,6 +2,7 @@ package adytum
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/ui"
@@ -89,8 +90,15 @@ func remoteError() error {
 // Отсутствие доступа к разделу — ожидаемое состояние машины, а не
 // поломка: ошибка сообщает это прямо, чтобы агент не искал обходной
 // путь и не пытался чинить шифрование.
+//
+// Подробности sops в сообщение не попадают: агент не может на них
+// повлиять, а объём текста мешает понять суть.
 func notRecipientError(err error) error {
-	return advise(err, ui.KindWarn, AdviceNotRecipient)
+	return advise(
+		fmt.Errorf("секция недоступна этой машине: расшифровка не удалась"),
+		ui.KindWarn,
+		AdviceNotRecipient,
+	)
 }
 
 // isNotRecipient сообщает, что ошибка вызвана отсутствием доступа.
