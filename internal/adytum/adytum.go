@@ -7,6 +7,7 @@ package adytum
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -37,12 +38,34 @@ type Runner interface {
 	Run(cmd Command, name string, args ...string) ([]byte, error)
 }
 
+// ContextRunner выполняет внешние команды с отменой по контексту.
+//
+// Отдельный интерфейс, а не метод Runner: не все исполнители умеют
+// прерывать процесс, но там, где это нужно (сетевые проверки с
+// таймаутом), реализация обязана уметь.
+type ContextRunner interface {
+	RunContext(ctx context.Context, cmd Command, name string, args ...string) ([]byte, error)
+}
+
 // Exec запускает настоящие внешние команды.
 type Exec struct{}
 
 // Run выполняет команду.
 func (Exec) Run(cmd Command, name string, args ...string) ([]byte, error) {
-	program := exec.Command(name, args...)
+	return Exec{}.run(context.Background(), cmd, name, args...)
+}
+
+// RunContext выполняет команду, прерывая её по отмене контекста.
+//
+// Прерывание нужно сетевым проверкам: git ls-remote на недоступном
+// remote иначе висит до бесконечности.
+func (e Exec) RunContext(ctx context.Context, cmd Command, name string, args ...string) ([]byte, error) {
+	return e.run(ctx, cmd, name, args...)
+}
+
+// run выполняет команду и собирает её вывод.
+func (Exec) run(ctx context.Context, cmd Command, name string, args ...string) ([]byte, error) {
+	program := exec.CommandContext(ctx, name, args...)
 	program.Dir = cmd.Dir
 	if cmd.Env != nil {
 		program.Env = append(os.Environ(), cmd.Env...)
@@ -58,7 +81,7 @@ func (Exec) Run(cmd Command, name string, args ...string) ([]byte, error) {
 		if message == "" {
 			message = err.Error()
 		}
-		return nil, fmt.Errorf("%s: %s", name, message)
+		return nil, fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), message)
 	}
 	return stdout.Bytes(), nil
 }

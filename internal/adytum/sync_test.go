@@ -1,0 +1,169 @@
+package adytum
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestSyncPullOnlyNeverPushes проверяет, что режим pull-only ничего не
+// отправляет.
+//
+// Таймер автосинхронизации работает в фоне: публиковать локальные
+// правки без участия человека он не должен.
+func TestSyncPullOnlyNeverPushes(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	if err := app.Sync(true); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "push") {
+			t.Errorf("pull-only выполнил push: %q", joined)
+		}
+	}
+}
+
+// TestSyncPushesWhenNotPullOnly проверяет обычный режим: изменения
+// отправляются.
+func TestSyncPushesWhenNotPullOnly(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	if err := app.Sync(false); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	pushed := false
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "push") {
+			pushed = true
+		}
+	}
+	if !pushed {
+		t.Error("обычный sync не выполнил push")
+	}
+}
+
+// TestSyncWithoutRemoteAdvisesBootstrap проверяет подсказку про
+// bootstrap-remote.
+//
+// Агент без remote не знает, что делать дальше: подсказка ведёт его
+// к нужной команде.
+func TestSyncWithoutRemoteAdvisesBootstrap(t *testing.T) {
+	runner := &fakeRunner{}
+	app := newTestApp(t, runner, t.TempDir())
+
+	var out bytes.Buffer
+	app.Out = &out
+	app.Err = &out
+	if err := app.Sync(true); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	if !strings.Contains(out.String(), AdviceRemote) {
+		t.Errorf("нет подсказки %q: %s", AdviceRemote, out.String())
+	}
+}
+
+// TestPullUsesCredentialsFileWhenPresent проверяет, что при наличии
+// ~/.git-credentials токен не нужен.
+//
+// Файл учётных данных — обычный способ авторизации: его наличие
+// избавляет от одноразовых URL с токеном.
+func TestPullUsesCredentialsFileWhenPresent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if err := os.WriteFile(filepath.Join(home, ".git-credentials"), []byte("https://user:pass@github.com\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	if err := app.pull(); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "x-access-token") {
+			t.Errorf("токен подставлен при наличии .git-credentials: %q", joined)
+		}
+	}
+}
+
+// TestAuthURLHidesTokenFromErrors проверяет, что токен не попадает в
+// текст ошибки.
+//
+// Git печатает URL с учётными данными: без очистки токен ушёл бы в
+// лог.
+func TestAuthURLHidesTokenFromErrors(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	authURL, err := app.authURL()
+	if err == nil {
+		t.Skip("токен недоступен на этой машине")
+	}
+	if strings.Contains(authURL, "x-access-token") {
+		t.Errorf("URL = %q, ожидался URL без токена", authURL)
+	}
+}
+
+// TestRequireUnlockBlocksGetWithoutMarker проверяет, что get закрыт
+// без маркера разблокировки.
+//
+// Значение секрета не должно попасть в лог агентской сессии.
+func TestRequireUnlockBlocksGetWithoutMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	app := newTestApp(t, &fakeRunner{}, t.TempDir())
+
+	err := app.requireUnlock()
+	if err == nil {
+		t.Fatal("ожидался отказ без маркера разблокировки")
+	}
+	adviser, ok := err.(Adviser)
+	if !ok {
+		t.Fatal("ошибка не содержит подсказки")
+	}
+	if adviser.Advice().Text != AdviceUnlock {
+		t.Errorf("подсказка = %q, ожидалось %q", adviser.Advice().Text, AdviceUnlock)
+	}
+}
+
+// TestUnlockAllowsGetWithMarker проверяет, что с маркером операция
+// проходит.
+func TestUnlockAllowsGetWithMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	app := newTestApp(t, &fakeRunner{}, t.TempDir())
+	app.Now = func() time.Time { return time.Now() }
+	if err := app.Unlock(); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	if err := app.requireUnlock(); err != nil {
+		t.Errorf("с маркером операция закрыта: %v", err)
+	}
+}

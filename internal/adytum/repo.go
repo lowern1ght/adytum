@@ -1,10 +1,11 @@
 package adytum
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lowern1ght/adytum/internal/filters"
 )
 
 // Gitattributes — содержимое .gitattributes, которое ставит adytum init.
@@ -101,11 +102,11 @@ func ensureSopsConfig(root string) (bool, error) {
 }
 
 // gitConfigValues — значения конфигурации git, которые adytum ставит.
-func gitConfigValues(keyFile string) map[string]string {
-	return map[string]string{
-		"filter.adytum.clean":    fmt.Sprintf("sops encrypt --filename-override %%f"),
-		"filter.adytum.smudge":   fmt.Sprintf("SOPS_AGE_KEY_FILE=%q sops decrypt --filename-override %%f", keyFile),
-		"filter.adytum.required": "true",
-		"diff.adytum.textconv":   "adytum diff-convert",
-	}
+//
+// Значения фильтров задаёт пакет filters: там же живут скрипты-обёртки,
+// которые эти значения вызывают.
+func gitConfigValues(scripts filters.Scripts) map[string]string {
+	values := filters.ConfigValues(scripts)
+	values["diff.adytum.textconv"] = "adytum diff-convert"
+	return values
 }

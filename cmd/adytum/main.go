@@ -3,7 +3,7 @@
 // adytum — тонкая обёртка над sops, git и age: вся криптография и работа
 // с репозиторием делаются внешними инструментами, CLI отвечает за
 // сценарии (init, sync, get, set, new, run, unlock, grant, revoke,
-// reencrypt, import, status).
+// reencrypt, import, status, doctor, bootstrap-remote, schedule).
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/adytum"
+	"github.com/lowern1ght/adytum/internal/ui"
 )
 
 // version — версия CLI.
@@ -20,29 +21,51 @@ const version = "0.1.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "adytum:", err)
+		// Отчёт самопроверки уже напечатан: повторять его в stderr
+		// незачем, нужен только код возврата.
+		if !errors.Is(err, adytum.ErrDoctorFailed) {
+			fmt.Fprintln(os.Stderr, "adytum:", err)
+			printAdvice(err)
+		}
 		os.Exit(1)
 	}
 }
 
-// commandHelp возвращает справку по команде.
+// printAdvice печатает подсказку «что делать» для ошибки.
+//
+// Подсказка объясняет агенту, куда двигаться дальше: без неё ошибка
+// выглядит тупиком, и агент начинает искать обходные пути.
+func printAdvice(err error) {
+	adviser, ok := err.(adytum.Adviser)
+	if !ok {
+		return
+	}
+	advice := adviser.Advice()
+	printer := ui.New(os.Stderr, false, false)
+	printer.Lock("%s", advice.Text)
+}
+
+// commandHelpText — справка по каждой команде.
 //
 // Справка нужна до инициализации репозитория, поэтому описание команд
 // хранится отдельно от основного списка.
 var commandHelpText = map[string]string{
-	"init":      "подготовить склонированный репозиторий: git-фильтры, .gitattributes, .sops.yaml\n               публичные ключи машин подставляются из ~/.adytum/recipients",
-	"sync":      "получить изменения, обновить рабочее дерево, отправить локальные коммиты",
-	"get":       "напечатать расшифрованный секрет\n               adytum get <project>/<service>            весь файл\n               adytum get <project>/<service>.<KEY>      одно значение\n               adytum get --json <project>/<service>     машинночитаемый вывод",
-	"set":       "отредактировать секрет в $EDITOR\n               adytum set <project>/<service>",
-	"new":       "создать новый секрет из шаблона и закоммитить его\n               adytum new <project>/<service>",
-	"run":       "выполнить команду с секретами в окружении\n               adytum run --env <project>/<service> -- <команда> [аргументы...]",
-	"unlock":    "разрешить агентским сессиям операции get и run на 8 часов",
-	"identity":  "указать, какой локальный ключ принадлежит этой машине\n               adytum identity <label>",
-	"grant":     "создать age-идентичность и выдать доступ\n               adytum grant <label>",
-	"revoke":    "отозвать доступ и перешифровать файлы\n               adytum revoke <label>",
-	"reencrypt": "перешифровать секреты по текущим правилам .sops.yaml",
-	"import":    "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
-	"status":    "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
+	"init":             "подготовить склонированный репозиторий: git-фильтры, .gitattributes, .sops.yaml\n               публичные ключи машин подставляются из ~/.adytum/recipients",
+	"sync":             "получить изменения, обновить рабочее дерево, отправить локальные коммиты\n               adytum sync --pull-only   только забрать изменения, ничего не отправляя",
+	"get":              "напечатать расшифрованный секрет\n               adytum get <project>/<service>            весь файл\n               adytum get <project>/<service>.<KEY>      одно значение\n               adytum get --json <project>/<service>     машинночитаемый вывод",
+	"set":              "отредактировать секрет в $EDITOR\n               adytum set <project>/<service>",
+	"new":              "создать новый секрет из шаблона и закоммитить его\n               adytum new <project>/<service>",
+	"run":              "выполнить команду с секретами в окружении\n               adytum run --env <project>/<service> -- <команда> [аргументы...]",
+	"unlock":           "разрешить агентским сессиям операции get и run на 8 часов",
+	"identity":         "указать, какой локальный ключ принадлежит этой машине\n               adytum identity <label>",
+	"grant":            "создать age-идентичность и выдать доступ\n               adytum grant <label>",
+	"revoke":           "отозвать доступ и перешифровать файлы\n               adytum revoke <label>",
+	"reencrypt":        "перешифровать секреты по текущим правилам .sops.yaml",
+	"import":           "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
+	"status":           "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
+	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json]",
+	"bootstrap-remote": "создать приватный репозиторий данных на GitHub и настроить remote\n               adytum bootstrap-remote [--json]",
+	"schedule":         "включить таймер автосинхронизации (systemd, раз в 5 минут, только pull)\n               adytum schedule [--json]",
 }
 
 // hasHelpFlag сообщает, есть ли среди аргументов флаг справки.
@@ -98,7 +121,7 @@ func run(args []string) error {
 	case "init":
 		return app.Init()
 	case "sync":
-		return app.Sync()
+		return runSync(app, rest)
 	case "get":
 		return runGet(app, rest)
 	case "set":
@@ -121,12 +144,32 @@ func run(args []string) error {
 		return runImport(app, rest)
 	case "status":
 		return runStatus(app, rest)
+	case "doctor":
+		return runDoctor(app, rest)
+	case "bootstrap-remote":
+		return runBootstrapRemote(app, rest)
+	case "schedule":
+		return runSchedule(app, rest)
 	case "diff-convert":
 		return runDiffConvert(app, rest)
 	default:
 		usage(os.Stderr)
 		return fmt.Errorf("неизвестная команда %q", command)
 	}
+}
+
+// runSync выполняет sync [--pull-only].
+func runSync(app *adytum.App, args []string) error {
+	pullOnly := false
+	for _, arg := range args {
+		switch arg {
+		case "--pull-only":
+			pullOnly = true
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	return app.Sync(pullOnly)
 }
 
 // runGet выполняет get <project>/<service>[.<KEY>].
@@ -268,18 +311,81 @@ func runImport(app *adytum.App, args []string) error {
 	return app.Import(args[0])
 }
 
-// runStatus выполняет status [--json].
+// runStatus выполняет status [--json] [--pretty].
 func runStatus(app *adytum.App, args []string) error {
 	jsonOutput := false
 	for _, arg := range args {
 		switch arg {
 		case "--json":
 			jsonOutput = true
+		case "--pretty":
+			app.Pretty = true
 		default:
 			return fmt.Errorf("неожиданный аргумент %q", arg)
 		}
 	}
-	return app.StatusJSON(jsonOutput)
+	if jsonOutput {
+		return app.StatusJSON()
+	}
+	return app.Status()
+}
+
+// runDoctor выполняет doctor [--json] [--pretty].
+func runDoctor(app *adytum.App, args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--pretty":
+			app.Pretty = true
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	app.JSON = jsonOutput
+	return app.DoctorPrint()
+}
+
+// runBootstrapRemote выполняет bootstrap-remote [--json].
+func runBootstrapRemote(app *adytum.App, args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--pretty":
+			app.Pretty = true
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	result, err := app.BootstrapRemote()
+	if jsonOutput {
+		return app.BootstrapJSON(result)
+	}
+	if err != nil {
+		return err
+	}
+	app.BootstrapReport(result)
+	return nil
+}
+
+// runSchedule выполняет schedule [--json].
+func runSchedule(app *adytum.App, args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--pretty":
+			app.Pretty = true
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	app.JSON = jsonOutput
+	return app.SchedulePrint()
 }
 
 // runDiffConvert выполняет внутреннюю команду diff-convert <file>.
@@ -299,7 +405,7 @@ func usage(out *os.File) {
 
 Команды:
   init                      подготовить склонированный репозиторий (фильтры, .sops.yaml)
-  sync                      получить изменения, обновить дерево, отправить свои
+  sync [--pull-only]        получить изменения, обновить дерево, отправить свои
   get <project>/<service>   напечатать расшифрованный секрет (или один ключ)
   set <project>/<service>   отредактировать секрет в $EDITOR
   new <project>/<service>   создать новый секрет из шаблона и закоммитить
@@ -311,6 +417,9 @@ func usage(out *os.File) {
   reencrypt                 перешифровать секреты по текущим правилам
   import <dir>              перенести plaintext-хранилище в репозиторий
   status [--json]           показать состояние репозитория
+  doctor [--json]           проверить окружение и исправить найденное
+  bootstrap-remote [--json] создать приватный репозиторий данных на GitHub
+  schedule [--json]         включить таймер автосинхронизации (systemd)
 
 Идентичность машины: `+"`~/.adytum/keys/<label>.txt`"+`, маркер разблокировки: `+"`~/.adytum/unlocked`"+`.
 `)

@@ -1,57 +1,95 @@
 package adytum
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/envfile"
-	"github.com/lowern1ght/adytum/internal/sopsconf"
-	"github.com/lowern1ght/adytum/internal/store"
-	"gopkg.in/yaml.v3"
 )
 
 // Run выполняет команду с секретами, подставленными в окружение.
 //
-// Каждый env-файл расшифровывается, его KEY=VALUE добавляются в
-// окружение процесса. Значения никогда не печатаются.
+// Команда запускается через shell, а не напрямую: плейсхолдеры
+// вида $GITLAB_TOKEN в аргументах раскрываются окружением в момент
+// запуска, и агент ни разу не видит значение секрета.
+//
+// Ключи из env-файлов добавляются в окружение процесса. Значения
+// никогда не печатаются.
 func (a *App) Run(envs []string, command []string) error {
 	if len(envs) == 0 {
 		return fmt.Errorf("%w: нужен хотя бы один --env", ErrUsage)
 	}
+	if len(command) == 0 {
+		return fmt.Errorf("%w: не указана команда", ErrUsage)
+	}
+	if err := a.requireUnlock(); err != nil {
+		return err
+	}
+	environment, err := a.runEnvironment(envs)
+	if err != nil {
+		return err
+	}
+	if err := runThroughShell(command, environment, a.Root, a.out(), a.errOut()); err != nil {
+		return err
+	}
+	a.staleHint(a.errOut())
+	return nil
+}
+
+// runEnvironment собирает окружение с секретами.
+func (a *App) runEnvironment(envs []string) ([]string, error) {
 	environment := os.Environ()
 	for _, target := range envs {
 		project, service, err := SplitTarget(target)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		path, _, err := ResolveSecret(a.Root, project, service)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		plain, err := a.readPlaintext(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		values, err := envValues(path, plain)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for key, value := range values {
-			environment = setEnv(environment, key, value)
+			environment = envfile.SetEnv(environment, key, value)
 		}
 	}
+	return environment, nil
+}
 
-	process := exec.Command(command[0], command[1:]...)
+// envValues разбирает секрет в пары переменных окружения.
+//
+// Поддерживаются все форматы хранилища: dotenv (KEY=VALUE), yaml и json
+// с плоскими ключами верхнего уровня. Вложенные структуры пропускаются:
+// переменная окружения хранит одно значение.
+func envValues(path string, plain []byte) (map[string]string, error) {
+	return envfile.Document(path, plain)
+}
+
+// runThroughShell выполняет команду через shell.
+//
+// Так аргументы вида $GITLAB_TOKEN раскрываются окружением уже в
+// момент запуска процесса.
+func runThroughShell(command []string, environment []string, dir string, stdout, stderr io.Writer) error {
+	shell, flag := shellCommand()
+	script := joinCommand(command)
+	process := exec.Command(shell, flag, script)
+	process.Dir = dir
 	process.Env = environment
 	process.Stdin = os.Stdin
-	process.Stdout = os.Stdout
-	process.Stderr = os.Stderr
+	process.Stdout = stdout
+	process.Stderr = stderr
 	if err := process.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -62,133 +100,61 @@ func (a *App) Run(envs []string, command []string) error {
 	return nil
 }
 
-// envValues извлекает пары KEY=VALUE из расшифрованного секрета.
+// shellCommand возвращает оболочку и её флаг для выполнения команды.
 //
-// Формат определяется расширением файла: .env разбирается как
-// KEY=VALUE, .yaml и .json — как отображение, значения которого
-// приводятся к строке.
-func envValues(path string, plain []byte) (map[string]string, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".yaml", ".yml", ".json":
-		return structuredValues(path, plain)
-	default:
-		entries, err := envfile.Parse(plain)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		values := make(map[string]string, len(entries))
-		for _, entry := range entries {
-			values[entry.Key] = entry.Value
-		}
-		return values, nil
-	}
-}
-
-// structuredValues разбирает yaml/json-секрет в пары KEY=VALUE.
-func structuredValues(path string, plain []byte) (map[string]string, error) {
-	var document map[string]any
-	if err := yaml.Unmarshal(plain, &document); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	values := make(map[string]string, len(document))
-	for key, value := range document {
-		values[key] = scalarString(value)
-	}
-	return values, nil
-}
-
-// scalarString приводит значение документа к строке.
-func scalarString(value any) string {
-	switch typed := value.(type) {
-	case nil:
-		return ""
-	case string:
-		return typed
-	case bool:
-		return strconv.FormatBool(typed)
-	case int:
-		return strconv.Itoa(typed)
-	case int64:
-		return strconv.FormatInt(typed, 10)
-	case float64:
-		return strconv.FormatFloat(typed, 'f', -1, 64)
-	default:
-		return fmt.Sprintf("%v", typed)
-	}
-}
-
-// setEnv заменяет или добавляет переменную окружения.
-func setEnv(environment []string, key, value string) []string {
-	prefix := key + "="
-	for index, entry := range environment {
-		if strings.HasPrefix(entry, prefix) {
-			environment[index] = prefix + value
-			return environment
-		}
-	}
-	return append(environment, prefix+value)
-}
-
-// StatusJSON печатает состояние репозитория.
+// Предпочтение отдаётся POSIX-оболочке: контракт агентов
+// (`curl -H "Bearer $GITLAB_TOKEN" ...`) опирается на раскрытие
+// переменных через `$ИМЯ`, а cmd.exe раскрывает только `%ИМЯ%`.
 //
-// При jsonOutput=true вывод идёт в формате JSON, иначе — текстом.
-func (a *App) StatusJSON(jsonOutput bool) error {
-	branch, _ := a.gitOutput("rev-parse", "--abbrev-ref", "HEAD")
-	remote, _ := a.gitOutput("remote", "get-url", "origin")
-
-	recipients := []string{}
-	content, err := os.ReadFile(SopsConfigPath(a.Root))
-	if err == nil {
-		config, parseErr := sopsconf.Parse(content)
-		if parseErr == nil {
-			recipients = config.Recipients()
-		}
+// На Windows POSIX-оболочка берётся из поставки Git-for-Windows: без
+// неё остаётся cmd /c.
+func shellCommand() (string, string) {
+	if _, err := exec.LookPath("sh"); err == nil {
+		return "sh", "-c"
 	}
-
-	unlock, unlockErr := store.Unlock(a.Now())
-	unlockActive := unlockErr == nil && unlock.Unlocked
-	unlockExpires := ""
-	if unlockErr == nil && !unlock.ExpiresAt.IsZero() {
-		unlockExpires = unlock.ExpiresAt.Format("2006-01-02T15:04:05Z07:00")
+	if runtime.GOOS == "windows" {
+		return "cmd", "/c"
 	}
-
-	filters := map[string]string{}
-	for _, key := range []string{"filter.adytum.clean", "filter.adytum.smudge", "filter.adytum.required"} {
-		value, _ := a.gitOutput("config", "--get", key)
-		filters[key] = value
-	}
-
-	if !jsonOutput {
-		return a.Status()
-	}
-
-	payload := map[string]any{
-		"branch":     branch,
-		"remote":     remote,
-		"recipients": recipients,
-		"unlock": map[string]any{
-			"active":     unlockActive,
-			"expires_at": unlockExpires,
-		},
-		"filters": filters,
-	}
-	encoded, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(encoded))
-	return nil
+	return "sh", "-c"
 }
 
-// listSecretPaths возвращает относительные пути файлов секретов.
-func (a *App) listSecretPaths() ([]string, error) {
-	paths, err := a.secretPaths()
-	if err != nil {
-		return nil, err
+// joinCommand собирает командную строку для shell.
+//
+// Аргументы соединяются пробелами в кавычках: границы слов должны
+// пережить сборку, иначе `curl -H "Bearer $TOKEN"` распадётся на
+// три аргумента.
+//
+// Единственный аргумент трактуется как готовая командная строка и
+// передаётся shell без изменений: так работает контракт плагина,
+// где команда приходит одним куском.
+//
+// Кавычки экранируются, а `$` — нет: переменная должна раскрыться в
+// окружении запуска.
+func joinCommand(command []string) string {
+	if len(command) == 1 {
+		return command[0]
 	}
-	relative := make([]string, 0, len(paths))
-	for _, path := range paths {
-		relative = append(relative, filepath.ToSlash(relativeTo(a.Root, path)))
+	quoted := make([]string, 0, len(command))
+	for _, argument := range command {
+		quoted = append(quoted, quoteArgument(argument))
 	}
-	return relative, nil
+	return strings.Join(quoted, " ")
+}
+
+// quoteArgument оборачивает аргумент в двойные кавычки.
+//
+// Экранируются только те символы, которые внутри кавычек меняют
+// смысл: обратный слэш, двойная кавычка и обратная кавычка.
+func quoteArgument(argument string) string {
+	var builder strings.Builder
+	builder.WriteByte('"')
+	for _, symbol := range argument {
+		switch symbol {
+		case '\\', '"', '`':
+			builder.WriteByte('\\')
+		}
+		builder.WriteRune(symbol)
+	}
+	builder.WriteByte('"')
+	return builder.String()
 }

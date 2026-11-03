@@ -1,6 +1,7 @@
 # Сборка Go
 /adytum
 /adytum.exe
+/adytum-linux
 *.exe
 
 # Локальное состояние adytum

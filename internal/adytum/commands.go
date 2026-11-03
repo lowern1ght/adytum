@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/lowern1ght/adytum/internal/filters"
 	"github.com/lowern1ght/adytum/internal/sopsconf"
+	"github.com/lowern1ght/adytum/internal/staleness"
 	"github.com/lowern1ght/adytum/internal/store"
+	"github.com/lowern1ght/adytum/internal/ui"
 )
 
 // App — состояние CLI: исполнитель команд и корень репозитория.
@@ -21,6 +26,14 @@ type App struct {
 	Root string
 	// Now — текущее время (подменяется в тестах).
 	Now func() time.Time
+	// Out — поток основного вывода.
+	Out io.Writer
+	// Err — поток подсказок и предупреждений.
+	Err io.Writer
+	// Pretty — принудительный цвет (флаг --pretty).
+	Pretty bool
+	// JSON — машинночитаемый вывод (флаг --json).
+	JSON bool
 }
 
 // New создаёт App и определяет корень репозитория.
@@ -29,13 +42,77 @@ func New(runner Runner) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{Runner: runner, Root: root, Now: time.Now}, nil
+	return &App{
+		Runner: runner,
+		Root:   root,
+		Now:    time.Now,
+		Out:    os.Stdout,
+		Err:    os.Stderr,
+	}, nil
+}
+
+// ui возвращает принтер основного вывода.
+//
+// Цвет включается только на терминале и только если не задан NO_COLOR;
+// флаг --pretty включает его принудительно.
+func (a *App) ui() *ui.Printer {
+	return ui.New(a.out(), a.Pretty, a.JSON)
+}
+
+// uiErr возвращает принтер потока подсказок.
+func (a *App) uiErr() *ui.Printer {
+	return ui.New(a.errOut(), a.Pretty, a.JSON)
+}
+
+// out возвращает поток основного вывода.
+func (a *App) out() io.Writer {
+	if a.Out == nil {
+		return os.Stdout
+	}
+	return a.Out
+}
+
+// errOut возвращает поток подсказок.
+func (a *App) errOut() io.Writer {
+	if a.Err == nil {
+		return os.Stderr
+	}
+	return a.Err
+}
+
+// print печатает в основной поток вывода.
+func (a *App) print(args ...any) {
+	fmt.Fprint(a.out(), args...)
+}
+
+// printf печатает в основной поток вывода.
+func (a *App) printf(format string, args ...any) {
+	fmt.Fprintf(a.out(), format, args...)
+}
+
+// println печатает строку в основной поток вывода.
+func (a *App) println(args ...any) {
+	fmt.Fprintln(a.out(), args...)
+}
+
+// hint печатает подсказку следующего шага в поток подсказок.
+//
+// Подсказка всегда идёт в stderr: stdout команд get и run содержит
+// полезную нагрузку (значение секрета, вывод программы), и примесь
+// текста там ломает разбор.
+func (a *App) hint(format string, args ...any) {
+	a.uiErr().Hint(format, args...)
 }
 
 // Init готовит уже склонированный репозиторий к работе.
 //
 // Проверяет наличие sops и git, ставит git-фильтры, создаёт .gitattributes
 // и .sops.yaml, если их ещё нет.
+//
+// Фильтры ставятся скриптами-обёртками в ~/.adytum/bin: напрямую
+// вызванный sops падает на пустом файле, а на машине без доступа
+// к разделу — съедает stdin и оставляет после себя пустой файл.
+// Обёртки эти две ситуации переживают.
 func (a *App) Init() error {
 	if err := Require("sops"); err != nil {
 		return err
@@ -73,21 +150,42 @@ func (a *App) Init() error {
 	if err := a.warnUnresolvedSlots(); err != nil {
 		return err
 	}
-	for key, value := range gitConfigValues(keyFile) {
+	scripts, err := a.installFilters(keyFile)
+	if err != nil {
+		return err
+	}
+	for key, value := range gitConfigValues(scripts) {
 		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "config", key, value); err != nil {
 			return fmt.Errorf("не удалось задать git config %s: %w", key, err)
 		}
 	}
 
-	fmt.Printf("репозиторий: %s\n", a.Root)
+	a.printf("репозиторий: %s\n", a.Root)
 	if createdAttrs {
-		fmt.Println("создан .gitattributes")
+		a.println("создан .gitattributes")
 	}
 	if createdSops {
-		fmt.Println("создан .sops.yaml")
+		a.println("создан .sops.yaml")
 	}
-	fmt.Println("git-фильтры adytum установлены")
+	a.printf("скрипты фильтров: %s\n", scripts.Smudge)
+	a.println("git-фильтры adytum установлены")
 	return nil
+}
+
+// installFilters записывает скрипты-обёртки git-фильтров.
+//
+// Скрипты живут в ~/.adytum/bin: они переживают переустановку CLI и
+// одинаково работают в Linux и в Git-for-Windows.
+func (a *App) installFilters(keyFile string) (filters.Scripts, error) {
+	binDir, err := store.BinDir()
+	if err != nil {
+		return filters.Scripts{}, err
+	}
+	scripts, err := filters.Install(binDir, keyFile)
+	if err != nil {
+		return filters.Scripts{}, err
+	}
+	return scripts, nil
 }
 
 // Sync синхронизирует репозиторий с remote.
@@ -95,28 +193,109 @@ func (a *App) Init() error {
 // Сначала подтягивает изменения, затем обновляет рабочее дерево, чтобы
 // smunge-фильтр применился к изменённым файлам, и только потом отправляет
 // локальные коммиты.
-func (a *App) Sync() error {
+//
+// В режиме pullOnly изменения только забираются: таймер автосинхронизации
+// не должен публиковать локальные правки без участия человека.
+func (a *App) Sync(pullOnly bool) error {
 	remote, _ := a.gitOutput("remote", "get-url", "origin")
 	if remote == "" {
-		fmt.Println("remote не настроен: синхронизация только с локальным репозиторием")
-	} else {
-		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "pull", "--rebase"); err != nil {
-			return fmt.Errorf("не удалось получить изменения: %w", err)
-		}
+		a.println("remote не настроен: синхронизация только с локальным репозиторием")
+		a.hint("%s", AdviceRemote)
+	} else if err := a.pull(); err != nil {
+		return fmt.Errorf("не удалось получить изменения: %w", err)
 	}
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "checkout", "--", "."); err != nil {
 		return fmt.Errorf("не удалось обновить рабочее дерево: %w", err)
 	}
+	if pullOnly {
+		a.println("получено (pull-only: отправка изменений пропущена)")
+		return nil
+	}
 	// push выполняем без --force: отправляем только то, что уже закоммичено.
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "push"); err != nil {
 		if remote == "" {
-			fmt.Println("remote не настроен: изменения сохранены только локально")
+			a.println("remote не настроен: изменения сохранены только локально")
 			return nil
 		}
 		return fmt.Errorf("не удалось отправить изменения: %w", err)
 	}
-	fmt.Println("репозиторий синхронизирован")
+	a.println("репозиторий синхронизирован")
+	a.hint("проверьте состояние: adytum status")
 	return nil
+}
+
+// pull забирает изменения с remote.
+//
+// Для приватного remote нужен доступ. Он берётся из ~/.git-credentials,
+// если файл есть; иначе используется одноразовый URL с токеном из
+// локального хранилища: токен не попадает ни в git config, ни на диск.
+//
+// smudge-фильтр при этом не должен ломать pull на машине без полного
+// доступа: недоступные разделы остаются шифротекстом, а операция
+// проходит.
+func (a *App) pull() error {
+	if a.hasGitCredentials() {
+		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "pull", "--rebase"); err != nil {
+			return err
+		}
+		return nil
+	}
+	url, err := a.authURL()
+	if err != nil {
+		// Без токена pull приватного remote невозможен, но это не
+		// повод падать: обычный pull справится и без него.
+		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "pull", "--rebase"); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "-c", "credential.helper=", "pull", "--rebase", url); err != nil {
+		return err
+	}
+	return nil
+}
+
+// hasGitCredentials сообщает, есть ли файл учётных данных git.
+func (a *App) hasGitCredentials() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(home, ".git-credentials"))
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// authURL собирает URL remote с токеном для одноразового использования.
+//
+// Токен не сохраняется: URL живёт только в аргументах команды.
+//
+// Формат x-access-token:<token>@ — тот, который GitHub принимает для
+// токенов доступа.
+func (a *App) authURL() (string, error) {
+	remote, err := a.gitOutput("remote", "get-url", "origin")
+	if err != nil || remote == "" {
+		return "", fmt.Errorf("remote не настроен")
+	}
+	scheme, rest, found := strings.Cut(remote, "://")
+	if !found {
+		return "", fmt.Errorf("remote %s не поддерживается", remote)
+	}
+	token, err := a.githubToken()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s://x-access-token:%s@%s", scheme, url.PathEscape(token), rest), nil
+}
+
+// githubToken достаёт токен GitHub из локального хранилища.
+//
+// Значение токена никогда не печатается.
+func (a *App) githubToken() (string, error) {
+	store, err := a.tokenStore()
+	if err != nil {
+		return "", err
+	}
+	return store.Token()
 }
 
 // sopsFor собирает обёртку sops с путём к приватному ключу машины.
@@ -161,6 +340,9 @@ func looksEncrypted(content []byte) bool {
 //
 // Если файл зашифрован, расшифровка выполняется в памяти: plaintext
 // никогда не попадает во временные файлы.
+//
+// Ошибка расшифровки на машине без доступа к разделу превращается в
+// понятное сообщение: это ожидаемое состояние, а не поломка.
 func (a *App) readPlaintext(path string) ([]byte, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -173,7 +355,14 @@ func (a *App) readPlaintext(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sops.DecryptFile(path)
+	plain, err := sops.DecryptFile(path)
+	if err != nil {
+		if isNotRecipient(err.Error()) {
+			return nil, notRecipientError(err)
+		}
+		return nil, err
+	}
+	return plain, nil
 }
 
 // writePlaintext записывает открытое содержимое в рабочее дерево.
@@ -203,7 +392,13 @@ func (a *App) stageFile(path string) error {
 //
 // Если задан key, печатается только значение этого ключа. Значение
 // уходит только в stdout.
+//
+// Операция требует активного маркера разблокировки: без него агентская
+// сессия не должна видеть значения.
 func (a *App) Get(project, service, key string) error {
+	if err := a.requireUnlock(); err != nil {
+		return err
+	}
 	path, _, err := ResolveSecret(a.Root, project, service)
 	if err != nil {
 		return err
@@ -213,18 +408,19 @@ func (a *App) Get(project, service, key string) error {
 		return err
 	}
 	if key == "" {
-		fmt.Print(string(plain))
-		return nil
+		fmt.Fprint(a.out(), string(plain))
+	} else {
+		entries, err := parseEntries(plain)
+		if err != nil {
+			return err
+		}
+		value, found := lookup(entries, key)
+		if !found {
+			return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
+		}
+		a.println(value)
 	}
-	entries, err := parseEntries(plain)
-	if err != nil {
-		return err
-	}
-	value, found := lookup(entries, key)
-	if !found {
-		return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
-	}
-	fmt.Println(value)
+	a.staleHint(a.errOut())
 	return nil
 }
 
@@ -233,6 +429,9 @@ func (a *App) Get(project, service, key string) error {
 // Значение попадает в поле "value" — это ожидаемое поведение команды
 // get: вывод запрашивается явно.
 func (a *App) GetJSON(project, service, key string) error {
+	if err := a.requireUnlock(); err != nil {
+		return err
+	}
 	path, _, err := ResolveSecret(a.Root, project, service)
 	if err != nil {
 		return err
@@ -263,8 +462,41 @@ func (a *App) GetJSON(project, service, key string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(encoded))
+	a.println(string(encoded))
 	return nil
+}
+
+// requireUnlock проверяет маркер разблокировки.
+//
+// Без маркера операции get и run закрыты: их вывод может попасть в лог
+// агентской сессии.
+func (a *App) requireUnlock() error {
+	state, err := store.Unlock(a.Now())
+	if err != nil {
+		return err
+	}
+	if state.Unlocked {
+		return nil
+	}
+	return unlockError()
+}
+
+// staleHint предупреждает, что локальная копия секретов отстала.
+//
+// Проверка молчит при любой неудаче: недоступность remote не должна
+// мешать работе, иначе подсказка превратится в новый источник ошибок.
+//
+// Поток вывода выбирает вызывающий: stdout команд get и run несёт
+// полезную нагрузку (значение секрета, вывод программы), и примесь
+// текста там ломает разбор.
+func (a *App) staleHint(out io.Writer) {
+	result := a.stalenessChecker().Check()
+	if !result.Stale() {
+		return
+	}
+	printer := ui.New(out, a.Pretty, false)
+	printer.Warn("secrets устарели: origin/%s впереди на %d → adytum sync",
+		staleness.DefaultBranch, result.Behind)
 }
 
 // Set открывает секрет в редакторе.
@@ -286,7 +518,7 @@ func (a *App) Set(project, service string) error {
 		return err
 	}
 	if edited == string(plain) {
-		fmt.Println("изменений нет")
+		a.println("изменений нет")
 		return nil
 	}
 	if err := a.writePlaintext(path, []byte(edited)); err != nil {
@@ -295,7 +527,7 @@ func (a *App) Set(project, service string) error {
 	if err := a.stageFile(path); err != nil {
 		return err
 	}
-	fmt.Printf("обновлён %s\n", relativeTo(a.Root, path))
+	a.printf("обновлён %s\n", relativeTo(a.Root, path))
 	return nil
 }
 
@@ -318,7 +550,7 @@ func (a *App) New(project, service string) error {
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "commit", "-m", message); err != nil {
 		return fmt.Errorf("не удалось закоммитить: %w", err)
 	}
-	fmt.Printf("создан %s\n", relativeTo(a.Root, path))
+	a.printf("создан %s\n", relativeTo(a.Root, path))
 	return nil
 }
 
@@ -331,7 +563,8 @@ func (a *App) Unlock() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("разблокировка активна до %s\n", expires.Format("2006-01-02T15:04:05Z07:00"))
+	a.printf("разблокировка активна до %s\n", expires.Format("2006-01-02T15:04:05Z07:00"))
+	a.hint("теперь доступны adytum get и adytum run")
 	return nil
 }
 
@@ -392,9 +625,9 @@ func (a *App) Grant(label string) error {
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): grant access to %s", label)); err != nil {
 		return err
 	}
-	fmt.Printf("метка %s создана\n", label)
-	fmt.Printf("публичный ключ (передайте машине получателя): %s\n", public)
-	fmt.Printf("приватный ключ: %s\n", keyFile)
+	a.printf("метка %s создана\n", label)
+	a.printf("публичный ключ (передайте машине получателя): %s\n", public)
+	a.printf("приватный ключ: %s\n", keyFile)
 	return nil
 }
 
@@ -432,8 +665,8 @@ func (a *App) Revoke(label string) error {
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): revoke access for %s", label)); err != nil {
 		return err
 	}
-	fmt.Printf("метка %s отозвана\n", label)
-	fmt.Println("ВАЖНО: ротируйте значения, которые эта машина уже видела — перешифровка их не отменяет")
+	a.printf("метка %s отозвана\n", label)
+	a.println("ВАЖНО: ротируйте значения, которые эта машина уже видела — перешифровка их не отменяет")
 	return nil
 }
 
@@ -446,7 +679,7 @@ func (a *App) Reencrypt() error {
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "add", "--renormalize", "."); err != nil {
 		return fmt.Errorf("не удалось перешифровать файлы: %w", err)
 	}
-	fmt.Println("файлы перешифрованы по текущим правилам .sops.yaml")
+	a.println("файлы перешифрованы по текущим правилам .sops.yaml")
 	return nil
 }
 
@@ -500,14 +733,36 @@ func (a *App) Import(dir string) error {
 		return err
 	}
 	if len(copied) == 0 {
-		fmt.Println("нечего импортировать")
+		a.println("нечего импортировать")
 		return nil
 	}
 	if err := a.commitAndPush("[.stbl](feat/adytum): import secrets from local store"); err != nil {
 		return err
 	}
-	fmt.Printf("импортировано файлов: %d\n", len(copied))
+	a.printf("импортировано файлов: %d\n", len(copied))
 	return nil
+}
+
+// StatusReport — состояние репозитория в машинночитаемом виде.
+type StatusReport struct {
+	// Branch — текущая ветка.
+	Branch string `json:"branch"`
+	// Remote — адрес remote origin.
+	Remote string `json:"remote"`
+	// Recipients — публичные ключи получателей из .sops.yaml.
+	Recipients []string `json:"recipients"`
+	// Unlock — состояние маркера разблокировки.
+	Unlock UnlockReport `json:"unlock"`
+	// Filters — настроенные git-фильтры adytum.
+	Filters map[string]string `json:"filters"`
+}
+
+// UnlockReport — состояние маркера разблокировки.
+type UnlockReport struct {
+	// Active — маркер действует.
+	Active bool `json:"active"`
+	// ExpiresAt — момент истечения маркера.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // Status печатает состояние репозитория.
@@ -515,51 +770,78 @@ func (a *App) Import(dir string) error {
 // Показывает ветку, remote, получателей из .sops.yaml, состояние
 // маркера разблокировки и наличие git-фильтров.
 func (a *App) Status() error {
+	report := a.statusReport()
+	printer := a.ui()
+	printer.Plain("ветка:    %s", orUnknown(report.Branch))
+	printer.Plain("remote:   %s", orUnknown(report.Remote))
+	if len(report.Recipients) == 0 {
+		printer.Plain("получатели: не заданы")
+	}
+	for _, recipient := range report.Recipients {
+		printer.Plain("получатель: %s", recipient)
+	}
+	if report.Unlock.Active {
+		printer.Plain("разблокировка: активна до %s", report.Unlock.ExpiresAt)
+	} else {
+		printer.Plain("разблокировка: не активна")
+		printer.Hint("%s", AdviceUnlock)
+	}
+	for _, key := range []string{"filter.adytum.clean", "filter.adytum.smudge", "filter.adytum.required"} {
+		value, ok := report.Filters[key]
+		if !ok || value == "" {
+			printer.Plain("git %s: не настроен", key)
+			continue
+		}
+		printer.Plain("git %s: %s", key, value)
+	}
+	a.staleHint(a.out())
+	return nil
+}
+
+// StatusJSON печатает состояние репозитория в машинночитаемом виде.
+func (a *App) StatusJSON() error {
+	encoded, err := json.MarshalIndent(a.statusReport(), "", "  ")
+	if err != nil {
+		return err
+	}
+	a.println(string(encoded))
+	return nil
+}
+
+// statusReport собирает состояние репозитория.
+func (a *App) statusReport() StatusReport {
 	branch, _ := a.gitOutput("rev-parse", "--abbrev-ref", "HEAD")
 	remote, _ := a.gitOutput("remote", "get-url", "origin")
 
-	fmt.Printf("ветка:    %s\n", orUnknown(branch))
-	fmt.Printf("remote:   %s\n", orUnknown(remote))
+	report := StatusReport{
+		Branch:  branch,
+		Remote:  remote,
+		Filters: map[string]string{},
+	}
 
 	content, err := os.ReadFile(SopsConfigPath(a.Root))
-	if err != nil {
-		fmt.Println("получатели: .sops.yaml не найден")
-	} else {
-		config, parseErr := sopsconf.Parse(content)
-		if parseErr != nil {
-			fmt.Printf("получатели: не удалось разобрать .sops.yaml: %v\n", parseErr)
-		} else {
-			recipients := config.Recipients()
-			if len(recipients) == 0 {
-				fmt.Println("получатели: не заданы")
-			}
-			for _, recipient := range recipients {
-				fmt.Printf("получатель: %s\n", recipient)
-			}
+	if err == nil {
+		if config, parseErr := sopsconf.Parse(content); parseErr == nil {
+			report.Recipients = config.Recipients()
 		}
 	}
 
 	state, err := store.Unlock(a.Now())
-	switch {
-	case err != nil:
-		fmt.Printf("разблокировка: ошибка чтения маркера: %v\n", err)
-	case state.Unlocked:
-		fmt.Printf("разблокировка: активна, осталось %s\n", state.Remaining.Round(time.Minute))
-	case state.ExpiresAt.IsZero():
-		fmt.Println("разблокировка: не активна (нет маркера)")
-	default:
-		fmt.Println("разблокировка: истекла")
+	if err == nil && state.Unlocked {
+		report.Unlock = UnlockReport{
+			Active:    true,
+			ExpiresAt: state.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
+		}
 	}
 
 	for _, key := range []string{"filter.adytum.clean", "filter.adytum.smudge", "filter.adytum.required"} {
 		value, err := a.gitOutput("config", "--get", key)
-		if err != nil || value == "" {
-			fmt.Printf("git %s: не настроен\n", key)
+		if err != nil {
 			continue
 		}
-		fmt.Printf("git %s: %s\n", key, value)
+		report.Filters[key] = value
 	}
-	return nil
+	return report
 }
 
 // DiffConvert — textconv-драйвер для git diff.
@@ -572,7 +854,7 @@ func (a *App) DiffConvert(path string) error {
 		return err
 	}
 	if !looksEncrypted(encrypted) {
-		fmt.Print(string(encrypted))
+		a.print(string(encrypted))
 		return nil
 	}
 	sops, err := a.sopsFor()
@@ -583,7 +865,7 @@ func (a *App) DiffConvert(path string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(string(plain))
+	a.print(string(plain))
 	return nil
 }
 
@@ -605,7 +887,7 @@ func (a *App) Identity(label string) error {
 	if err := store.SetIdentityLabel(label); err != nil {
 		return err
 	}
-	fmt.Printf("идентичность машины: %s\n", label)
+	a.printf("идентичность машины: %s\n", label)
 	return nil
 }
 
@@ -658,8 +940,8 @@ func (a *App) warnUnresolvedSlots() error {
 	if len(labels) == 0 {
 		return nil
 	}
-	fmt.Printf("ВНИМАНИЕ: не заполнены слоты получателей: %s\n", strings.Join(labels, ", "))
-	fmt.Println("выполните `adytum grant <label>`, чтобы sops смог шифровать файлы")
+	a.printf("ВНИМАНИЕ: не заполнены слоты получателей: %s\n", strings.Join(labels, ", "))
+	a.println("выполните `adytum grant <label>`, чтобы sops смог шифровать файлы")
 	return nil
 }
 
@@ -802,7 +1084,7 @@ func (a *App) commitAndPush(message string) error {
 	}
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "push"); err != nil {
 		if remote, _ := a.gitOutput("remote", "get-url", "origin"); remote == "" {
-			fmt.Println("remote не настроен: изменения сохранены только локально")
+			a.println("remote не настроен: изменения сохранены только локально")
 			return nil
 		}
 		return fmt.Errorf("не удалось отправить изменения: %w", err)

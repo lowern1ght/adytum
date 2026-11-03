@@ -43,10 +43,13 @@ function unlockedState() {
 }
 
 // unlockMessage — текст отказа для агента.
+//
+// Формулировка совпадает с подсказкой CLI: агент видит одну и ту же
+// формулировку независимо от точки входа.
 function unlockMessage(reason) {
   return [
-    `adytum: операция отклонена — ${reason}.`,
-    "Попроси владельца выполнить `adytum unlock` и повторить запрос.",
+    `adytum: операция отклокирована — ${reason}.`,
+    "🔒 попроси владельца: adytum unlock (TTL 8h)",
   ].join(" ")
 }
 
@@ -73,10 +76,12 @@ function runAdytum(args) {
 }
 
 // getArgs строит аргументы CLI для чтения секрета.
+//
+// Ключ передаётся точкой в адресе (<project>/<service>.<KEY>): так его
+// понимает CLI, и отдельный аргумент молча игнорировался бы.
 function getArgs(input) {
   const target = [input.project, input.service].filter(Boolean).join("/")
-  const args = ["get", target]
-  if (input.key) args.push(input.key)
+  const args = ["get", input.key ? `${target}.${input.key}` : target]
   return args
 }
 

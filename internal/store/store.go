@@ -24,6 +24,8 @@ const (
 	UnlockFileName = "unlocked"
 	// UnlockTTL — срок жизни маркера разблокировки.
 	UnlockTTL = 8 * time.Hour
+	// BinDirName — подкаталог со скриптами git-фильтров.
+	BinDirName = "bin"
 )
 
 // Home возвращает путь к каталогу состояния (~/.adytum).
@@ -78,6 +80,18 @@ func UnlockPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, UnlockFileName), nil
+}
+
+// BinDir возвращает каталог скриптов git-фильтров (~/.adytum/bin).
+//
+// Фильтры git запускаются как shell-скрипты: отдельные файлы переживают
+// переустановку CLI и одинаково работают в Linux и в Git-for-Windows.
+func BinDir() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, BinDirName), nil
 }
 
 // EnsureHome создаёт каталог состояния и подкаталог идентичностей.
