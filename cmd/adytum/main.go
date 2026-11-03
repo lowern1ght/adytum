@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/adytum"
+	"github.com/lowern1ght/adytum/internal/registry"
 	"github.com/lowern1ght/adytum/internal/ui"
 )
 
@@ -53,14 +54,17 @@ var commandHelpText = map[string]string{
 	"init":             "подготовить склонированный репозиторий: git-фильтры, .gitattributes, .sops.yaml\n               публичные ключи машин подставляются из ~/.adytum/recipients",
 	"sync":             "получить изменения, обновить рабочее дерево, отправить локальные коммиты\n               adytum sync --pull-only   только забрать изменения, ничего не отправляя",
 	"get":              "напечатать расшифрованный секрет\n               adytum get <project>/<service>            весь файл\n               adytum get <project>/<service>.<KEY>      одно значение\n               adytum get --json <project>/<service>     машинночитаемый вывод",
-	"set":              "отредактировать секрет в $EDITOR\n               adytum set <project>/<service>",
-	"new":              "создать новый секрет из шаблона и закоммитить его\n               adytum new <project>/<service>",
+	"list":             "показать реестр секретов\n               adytum list              таблица записей\n               adytum list <entry>      подробно об одном секрете",
+	"set":              "занести значение в секрет\n               adytum set <project>/<service> <KEY>   один ключ\n               adytum set <project>/<service>         все ключи записи\n               adytum set <project>/<service> <KEY> --stdin   значение из stdin",
+	"unset":            "удалить ключ из секрета\n               adytum unset <project>/<service> <KEY>",
+	"edit":             "открыть секрет в $EDITOR\n               adytum edit <project>/<service>",
+	"new":              "создать новый секрет: файл, запись в реестре и коммит\n               adytum new <project>/<service> [--type env|yaml|json|binary|kubeconfig]\n                                    [--description \"описание\"] [--scope <scope>]",
 	"run":              "выполнить команду с секретами в окружении\n               adytum run --env <project>/<service> -- <команда> [аргументы...]",
 	"unlock":           "разрешить агентским сессиям операции get и run на 8 часов",
 	"identity":         "указать, какой локальный ключ принадлежит этой машине\n               adytum identity <label>",
-	"grant":            "создать age-идентичность и выдать доступ\n               adytum grant <label>",
+	"grant":            "создать age-идентичность и выдать доступ\n               adytum grant <label> [--scope <scope>]",
 	"revoke":           "отозвать доступ и перешифровать файлы\n               adytum revoke <label>",
-	"reencrypt":        "перешифровать секреты по текущим правилам .sops.yaml",
+	"reencrypt":        "перешифровать секреты по правилам реестра\n               adytum reencrypt [--yes]",
 	"import":           "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
 	"status":           "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
 	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json]",
@@ -126,8 +130,14 @@ func run(args []string) error {
 		return runGet(app, rest)
 	case "set":
 		return runSet(app, rest)
+	case "unset":
+		return runUnset(app, rest)
+	case "edit":
+		return runEdit(app, rest)
 	case "new":
 		return runNew(app, rest)
+	case "list":
+		return runList(app, rest)
 	case "run":
 		return runRun(app, rest)
 	case "unlock":
@@ -139,7 +149,7 @@ func run(args []string) error {
 	case "revoke":
 		return runRevoke(app, rest)
 	case "reencrypt":
-		return app.Reencrypt()
+		return runReencrypt(app, rest)
 	case "import":
 		return runImport(app, rest)
 	case "status":
@@ -223,28 +233,120 @@ func splitKey(target string) (string, string, string, error) {
 	return project, name, key, nil
 }
 
-// runSet выполняет set <project>/<service>.
+// runSet выполняет set <project>/<service> [KEY] [--stdin].
 func runSet(app *adytum.App, args []string) error {
-	if len(args) == 0 {
-		return errors.New("указание: adytum set <project>/<service>")
+	options := adytum.SetOptions{}
+	targets := []string{}
+	for _, arg := range args {
+		switch arg {
+		case "--stdin":
+			options.FromStdin = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("неожиданный аргумент %q", arg)
+			}
+			targets = append(targets, arg)
+		}
 	}
-	project, service, err := adytum.SplitTarget(args[0])
-	if err != nil {
-		return err
+	if len(targets) == 0 {
+		return errors.New("указание: adytum set <project>/<service> [KEY] [--stdin]")
 	}
-	return app.Set(project, service)
+	if len(targets) > 2 {
+		return errors.New("указание: adytum set <project>/<service> [KEY] [--stdin]")
+	}
+	options.Key = ""
+	if len(targets) == 2 {
+		options.Key = targets[1]
+	}
+	return app.Set(targets[0], options)
 }
 
-// runNew выполняет new <project>/<service>.
-func runNew(app *adytum.App, args []string) error {
+// runUnset выполняет unset <project>/<service> <KEY>.
+func runUnset(app *adytum.App, args []string) error {
+	if len(args) != 2 {
+		return errors.New("указание: adytum unset <project>/<service> <KEY>")
+	}
+	return app.Unset(args[0], args[1])
+}
+
+// runEdit выполняет edit <project>/<service>.
+func runEdit(app *adytum.App, args []string) error {
 	if len(args) == 0 {
-		return errors.New("указание: adytum new <project>/<service>")
+		return errors.New("указание: adytum edit <project>/<service>")
 	}
 	project, service, err := adytum.SplitTarget(args[0])
 	if err != nil {
 		return err
 	}
-	return app.New(project, service)
+	return app.Edit(project, service)
+}
+
+// runNew выполняет new <project>/<service> [--type T] [--description D] [--scope S].
+func runNew(app *adytum.App, args []string) error {
+	options := adytum.NewOptions{}
+	targets := []string{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--type" || arg == "--description" || arg == "--scope":
+			index++
+			if index >= len(args) {
+				return fmt.Errorf("%s требует значение", arg)
+			}
+			value := args[index]
+			switch arg {
+			case "--type":
+				options.Type = registry.Type(value)
+			case "--description":
+				options.Description = value
+				options.DescriptionSet = true
+			case "--scope":
+				options.Scope = value
+			}
+		case strings.HasPrefix(arg, "--type="):
+			options.Type = registry.Type(strings.TrimPrefix(arg, "--type="))
+		case strings.HasPrefix(arg, "--description="):
+			options.Description = strings.TrimPrefix(arg, "--description=")
+			options.DescriptionSet = true
+		case strings.HasPrefix(arg, "--scope="):
+			options.Scope = strings.TrimPrefix(arg, "--scope=")
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("неожиданный аргумент %q", arg)
+			}
+			targets = append(targets, arg)
+		}
+	}
+	if len(targets) == 0 {
+		return errors.New("указание: adytum new <project>/<service>")
+	}
+	return app.New(targets[0], options)
+}
+
+// runList выполняет list [<entry>] [--json].
+func runList(app *adytum.App, args []string) error {
+	targets := []string{}
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			app.JSON = true
+		case "--pretty":
+			app.Pretty = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("неожиданный аргумент %q", arg)
+			}
+			targets = append(targets, arg)
+		}
+	}
+	if len(targets) > 1 {
+		return errors.New("указание: adytum list [<entry>]")
+	}
+	name := ""
+	if len(targets) == 1 {
+		name = targets[0]
+	}
+	return app.List(name)
 }
 
 // runRun выполняет run --env <project>/<service>... -- <команда> [аргументы...].
@@ -287,12 +389,35 @@ func runIdentity(app *adytum.App, args []string) error {
 	return app.Identity(args[0])
 }
 
-// runGrant выполняет grant <label>.
+// runGrant выполняет grant <label> [--scope S].
 func runGrant(app *adytum.App, args []string) error {
-	if len(args) == 0 {
+	label := ""
+	scope := ""
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--scope":
+			index++
+			if index >= len(args) {
+				return errors.New("--scope требует значение")
+			}
+			scope = args[index]
+		case strings.HasPrefix(arg, "--scope="):
+			scope = strings.TrimPrefix(arg, "--scope=")
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("неожиданный аргумент %q", arg)
+			}
+			if label != "" {
+				return errors.New("указание: adytum grant <label>")
+			}
+			label = arg
+		}
+	}
+	if label == "" {
 		return errors.New("указание: adytum grant <label>")
 	}
-	return app.Grant(args[0])
+	return app.Grant(label, scope)
 }
 
 // runRevoke выполняет revoke <label>.
@@ -301,6 +426,20 @@ func runRevoke(app *adytum.App, args []string) error {
 		return errors.New("указание: adytum revoke <label>")
 	}
 	return app.Revoke(args[0])
+}
+
+// runReencrypt выполняет reencrypt [--yes].
+func runReencrypt(app *adytum.App, args []string) error {
+	confirmed := false
+	for _, arg := range args {
+		switch arg {
+		case "--yes", "-y":
+			confirmed = true
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	return app.Reencrypt(confirmed)
 }
 
 // runImport выполняет import <dir>.
@@ -407,8 +546,11 @@ func usage(out *os.File) {
   init                      подготовить склонированный репозиторий (фильтры, .sops.yaml)
   sync [--pull-only]        получить изменения, обновить дерево, отправить свои
   get <project>/<service>   напечатать расшифрованный секрет (или один ключ)
-  set <project>/<service>   отредактировать секрет в $EDITOR
-  new <project>/<service>   создать новый секрет из шаблона и закоммитить
+  list [<entry>]            показать реестр секретов
+  set <p>/<s> [KEY]         занести значение в секрет (--stdin — из stdin)
+  unset <p>/<s> <KEY>       удалить ключ из секрета
+  edit <project>/<service>  отредактировать секрет в $EDITOR
+  new <project>/<service>   создать новый секрет и запись в реестре
   run --env <p>/<s> -- cmd  выполнить команду с секретами в окружении
   unlock                    разрешить агентским сессиям операции get и run
   identity <label>          указать, какой локальный ключ принадлежит этой машине

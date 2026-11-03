@@ -64,7 +64,21 @@ const (
 	AdviceRemote = "adytum bootstrap-remote"
 	// AdviceNotRecipient — машина не в списке получателей.
 	AdviceNotRecipient = "секция недоступна этой машине (recipients .sops.yaml) — ожидаемо"
+	// AdviceOutOfScope — раздел вне machine_scope машины.
+	AdviceOutOfScope = "раздел вне machine_scope этой машины — попроси владельца расширить scope"
 )
+
+// scopeSection возвращает раздел секрета по пути относительно корня.
+//
+// Раздел — первый компонент пути: personal/github.env лежит в
+// разделе personal.
+func scopeSection(relative string) string {
+	parts := strings.SplitN(strings.TrimPrefix(relative, "./"), "/", 2)
+	if len(parts) < 2 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
+}
 
 // ErrUnlockRequired — операция требует активного маркера разблокировки.
 var ErrUnlockRequired = errors.New("операция закрыта: нет активной разблокировки")

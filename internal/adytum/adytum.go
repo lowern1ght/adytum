@@ -19,6 +19,9 @@ import (
 // ErrNotFound — целевой файл или запись не найдены.
 var ErrNotFound = errors.New("не найдено")
 
+// ErrKeyNotFound — ключ не найден внутри секрета.
+var ErrKeyNotFound = errors.New("ключ не найден")
+
 // ErrUsage — ошибка в аргументах команды.
 var ErrUsage = errors.New("ошибка использования")
 

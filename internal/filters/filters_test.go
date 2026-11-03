@@ -57,7 +57,7 @@ func TestSmudgeScriptKeepsFailedDecryptOutput(t *testing.T) {
 func TestInstallWritesScripts(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bin")
 
-	scripts, err := Install(dir, "/keys/pc.txt")
+	scripts, err := Install(dir, "/keys/pc.txt", nil)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -81,10 +81,10 @@ func TestInstallWritesScripts(t *testing.T) {
 
 func TestInstallOverwritesExistingScripts(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Install(dir, "/keys/old.txt"); err != nil {
+	if _, err := Install(dir, "/keys/old.txt", nil); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if _, err := Install(dir, "/keys/new.txt"); err != nil {
+	if _, err := Install(dir, "/keys/new.txt", nil); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -94,6 +94,25 @@ func TestInstallOverwritesExistingScripts(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "/keys/new.txt") {
 		t.Error("повторная установка должна обновлять скрипт")
+	}
+}
+
+func TestInstallWritesScopeAwareSmudge(t *testing.T) {
+	// Настроенный machine_scope меняет поведение smunge-фильтра:
+	// файл вне списка разделов остаётся шифротекстом.
+	dir := filepath.Join(t.TempDir(), "bin")
+
+	scripts, err := Install(dir, "/keys/pc.txt", []string{"personal"})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	content, err := os.ReadFile(scripts.Smudge)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(content), "personal") {
+		t.Errorf("smudge-фильтр не знает разделов machine_scope: %q", string(content))
 	}
 }
 

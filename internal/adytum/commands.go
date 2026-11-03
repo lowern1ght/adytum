@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/lowern1ght/adytum/internal/filters"
+	"github.com/lowern1ght/adytum/internal/registry"
+	"github.com/lowern1ght/adytum/internal/scope"
 	"github.com/lowern1ght/adytum/internal/sopsconf"
 	"github.com/lowern1ght/adytum/internal/staleness"
 	"github.com/lowern1ght/adytum/internal/store"
@@ -176,12 +178,19 @@ func (a *App) Init() error {
 //
 // Скрипты живут в ~/.adytum/bin: они переживают переустановку CLI и
 // одинаково работают в Linux и в Git-for-Windows.
+//
+// Разделы machine_scope попадают в smunge-фильтр: файлы вне списка
+// остаются в рабочем дереве шифротекстом.
 func (a *App) installFilters(keyFile string) (filters.Scripts, error) {
 	binDir, err := store.BinDir()
 	if err != nil {
 		return filters.Scripts{}, err
 	}
-	scripts, err := filters.Install(binDir, keyFile)
+	config, err := scope.Load()
+	if err != nil {
+		return filters.Scripts{}, err
+	}
+	scripts, err := filters.Install(binDir, keyFile, config.MachineScope)
 	if err != nil {
 		return filters.Scripts{}, err
 	}
@@ -388,84 +397,6 @@ func (a *App) stageFile(path string) error {
 	return nil
 }
 
-// Get печатает расшифрованное содержимое секрета.
-//
-// Если задан key, печатается только значение этого ключа. Значение
-// уходит только в stdout.
-//
-// Операция требует активного маркера разблокировки: без него агентская
-// сессия не должна видеть значения.
-func (a *App) Get(project, service, key string) error {
-	if err := a.requireUnlock(); err != nil {
-		return err
-	}
-	path, _, err := ResolveSecret(a.Root, project, service)
-	if err != nil {
-		return err
-	}
-	plain, err := a.readPlaintext(path)
-	if err != nil {
-		return err
-	}
-	if key == "" {
-		fmt.Fprint(a.out(), string(plain))
-	} else {
-		entries, err := parseEntries(plain)
-		if err != nil {
-			return err
-		}
-		value, found := lookup(entries, key)
-		if !found {
-			return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
-		}
-		a.println(value)
-	}
-	a.staleHint(a.errOut())
-	return nil
-}
-
-// GetJSON печатает секрет в машинночитаемом виде.
-//
-// Значение попадает в поле "value" — это ожидаемое поведение команды
-// get: вывод запрашивается явно.
-func (a *App) GetJSON(project, service, key string) error {
-	if err := a.requireUnlock(); err != nil {
-		return err
-	}
-	path, _, err := ResolveSecret(a.Root, project, service)
-	if err != nil {
-		return err
-	}
-	plain, err := a.readPlaintext(path)
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{
-		"project": project,
-		"service": service,
-	}
-	if key == "" {
-		payload["content"] = string(plain)
-	} else {
-		entries, err := parseEntries(plain)
-		if err != nil {
-			return err
-		}
-		value, found := lookup(entries, key)
-		if !found {
-			return fmt.Errorf("ключ %s не найден в %s", key, filepath.Base(path))
-		}
-		payload["key"] = key
-		payload["value"] = value
-	}
-	encoded, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	a.println(string(encoded))
-	return nil
-}
-
 // requireUnlock проверяет маркер разблокировки.
 //
 // Без маркера операции get и run закрыты: их вывод может попасть в лог
@@ -499,12 +430,16 @@ func (a *App) staleHint(out io.Writer) {
 		staleness.DefaultBranch, result.Behind)
 }
 
-// Set открывает секрет в редакторе.
+// Edit открывает секрет в редакторе.
 //
 // Файл расшифровывается, открывается в $EDITOR, результат записывается
 // обратно в рабочее дерево и добавляется в индекс: шифротекст в
 // репозитории обеспечит clean-фильтр git.
-func (a *App) Set(project, service string) error {
+//
+// Редактор — для неструктурированных секретов: json, kubeconfig,
+// бинарные файлы. Обычные ключи удобнее задавать через `adytum set`:
+// значения не попадают в историю оболочки.
+func (a *App) Edit(project, service string) error {
 	path, _, err := ResolveSecret(a.Root, project, service)
 	if err != nil {
 		return err
@@ -531,29 +466,6 @@ func (a *App) Set(project, service string) error {
 	return nil
 }
 
-// New создаёт новый секрет из шаблона и коммитит его.
-func (a *App) New(project, service string) error {
-	if project == "" || service == "" {
-		return fmt.Errorf("%w: укажите проект и сервис: adytum new <project>/<service>", ErrUsage)
-	}
-	path := filepath.Join(a.Root, project, service+".env")
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("секрет %s уже существует", relativeTo(a.Root, path))
-	}
-	if err := a.writePlaintext(path, []byte(newEntryTemplate)); err != nil {
-		return err
-	}
-	if err := a.stageFile(path); err != nil {
-		return err
-	}
-	message := fmt.Sprintf("[.stbl](feat/adytum): add %s/%s secret entry", project, service)
-	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "commit", "-m", message); err != nil {
-		return fmt.Errorf("не удалось закоммитить: %w", err)
-	}
-	a.printf("создан %s\n", relativeTo(a.Root, path))
-	return nil
-}
-
 // Unlock создаёт маркер разблокировки для агентских сессий.
 //
 // Маркер живёт 8 часов (store.UnlockTTL) и разрешает плагину выполнять
@@ -571,10 +483,14 @@ func (a *App) Unlock() error {
 // Grant добавляет нового получателя.
 //
 // Генерируется новая age-идентичность, приватный ключ кладётся в
-// ~/.adytum/keys/<label>.txt, публичный ключ занимает слот роли в
-// .sops.yaml, после чего файлы перешифровываются под новый набор
+// ~/.adytum/keys/<label>.txt, публичный ключ попадает в реестр, а
+// метка — в scope, определяющий видимые разделы. Затем .sops.yaml
+// пересобирается из реестра и файлы перешифровываются под новый набор
 // получателей.
-func (a *App) Grant(label string) error {
+//
+// Реестр — единственный источник правды: без записи в нём выдача
+// доступа была бы стёрта ближайшим `adytum reencrypt`.
+func (a *App) Grant(label string, scopeName string) error {
 	if label == "" {
 		return fmt.Errorf("%w: укажите метку: adytum grant <label>", ErrUsage)
 	}
@@ -611,31 +527,65 @@ func (a *App) Grant(label string) error {
 		return err
 	}
 
-	// .sops.yaml нужен до выдачи доступа: без правил шифрования sops
-	// не сможет ни зашифровать, ни перешифровать файлы.
-	if _, err := ensureSopsConfig(a.Root); err != nil {
+	scope, err := a.resolveGrantScope(scopeName)
+	if err != nil {
 		return err
 	}
-	if err := a.addRecipientToRules(label, public); err != nil {
+	if err := a.updateRegistry(func(document *registry.Document) error {
+		if err := document.SetRecipient(label, public); err != nil {
+			return err
+		}
+		return document.AddToScope(scope, label)
+	}); err != nil {
 		return err
 	}
-	if err := a.Reencrypt(); err != nil {
+	if err := a.Reencrypt(true); err != nil {
 		return err
 	}
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): grant access to %s", label)); err != nil {
 		return err
 	}
 	a.printf("метка %s создана\n", label)
+	a.printf("scope: %s\n", scope)
 	a.printf("публичный ключ (передайте машине получателя): %s\n", public)
 	a.printf("приватный ключ: %s\n", keyFile)
 	return nil
 }
 
+// resolveGrantScope определяет scope, в который попадёт новая машина.
+//
+// По умолчанию — scope «default»: он покрывает все разделы, кроме
+// закрытых. Выдача доступа к закрытому разделу должна быть явной.
+func (a *App) resolveGrantScope(requested string) (string, error) {
+	if err := a.ensureRegistryFile(); err != nil {
+		return "", err
+	}
+	loaded, err := a.loadRegistry()
+	if err != nil {
+		return "", err
+	}
+	if requested != "" {
+		if _, found := loaded.Scope(requested); !found {
+			return "", fmt.Errorf("%w: scope %s не определён в реестре", ErrUsage, requested)
+		}
+		return requested, nil
+	}
+	if _, found := loaded.Scope(registry.DefaultScope); found {
+		return registry.DefaultScope, nil
+	}
+	names := loaded.ScopeNames()
+	if len(names) == 0 {
+		return "", fmt.Errorf("%w: в реестре нет scopes", ErrUsage)
+	}
+	return names[0], nil
+}
+
 // Revoke убирает получателя.
 //
-// Публичный ключ удаляется из .sops.yaml, файлы перешифровываются без
-// него. Значения, которые снятая машина успела увидеть, нужно ротировать
-// вручную — перешифровка их не отменяет.
+// Публичный ключ удаляется из реестра и из scopes, .sops.yaml
+// пересобирается, файлы перешифровываются без получателя. Значения,
+// которые снятая машина успела увидеть, нужно ротировать вручную —
+// перешифровка их не отменяет.
 func (a *App) Revoke(label string) error {
 	if label == "" {
 		return fmt.Errorf("%w: укажите метку: adytum revoke <label>", ErrUsage)
@@ -644,22 +594,24 @@ func (a *App) Revoke(label string) error {
 	if err != nil {
 		return err
 	}
-	public, found := recipients[label]
-	if !found {
+	if _, found := recipients[label]; !found {
 		return fmt.Errorf("метка %s не найдена в реестре получателей", label)
 	}
-	removed, err := a.removeRecipientFromRules(public)
-	if err != nil {
+
+	if err := a.updateRegistry(func(document *registry.Document) error {
+		document.RemoveRecipient(label)
+		for _, scope := range document.ScopeNames() {
+			document.RemoveFromScope(scope, label)
+		}
+		return nil
+	}); err != nil {
 		return err
-	}
-	if removed == 0 {
-		return fmt.Errorf("получатель %s не найден в .sops.yaml", public)
 	}
 	delete(recipients, label)
 	if err := store.SaveRecipients(recipients); err != nil {
 		return err
 	}
-	if err := a.Reencrypt(); err != nil {
+	if err := a.Reencrypt(true); err != nil {
 		return err
 	}
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): revoke access for %s", label)); err != nil {
@@ -670,16 +622,40 @@ func (a *App) Revoke(label string) error {
 	return nil
 }
 
-// Reencrypt перешифровывает все секреты по текущим правилам .sops.yaml.
+// updateRegistry применяет правку к реестру и сохраняет файл.
 //
-// Файлы перешифровываются через clean-фильтр git: команда renormalize
-// прогоняет содержимое рабочего дерева через sops encrypt заново, с
-// новым набором получателей из .sops.yaml.
-func (a *App) Reencrypt() error {
-	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "add", "--renormalize", "."); err != nil {
-		return fmt.Errorf("не удалось перешифровать файлы: %w", err)
+// Правка применяется к загруженному документу: комментарии и порядок
+// ключей сохраняются.
+func (a *App) updateRegistry(edit func(document *registry.Document) error) error {
+	if err := a.ensureRegistryFile(); err != nil {
+		return err
 	}
-	a.println("файлы перешифрованы по текущим правилам .sops.yaml")
+	document, err := registry.Load(a.RegistryPath())
+	if err != nil {
+		return err
+	}
+	if err := edit(document); err != nil {
+		return err
+	}
+	return document.Save(a.RegistryPath())
+}
+
+// ensureRegistryFile создаёт файл реестра, если его ещё нет.
+//
+// Хранилище без реестра — обычное состояние первого запуска: файл
+// создаётся из шаблона, а записи добавляются по мере создания
+// секретов. Без этого первая же команда, которой нужен реестр,
+// падала бы на пустом хранилище.
+func (a *App) ensureRegistryFile() error {
+	path := a.RegistryPath()
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(path, registry.Template(), 0o644); err != nil {
+		return fmt.Errorf("не удалось создать %s: %w", path, err)
+	}
 	return nil
 }
 

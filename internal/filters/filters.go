@@ -129,7 +129,11 @@ fi
 //
 // Каталог создаётся, если его ещё нет. Скрипты получают права 0700:
 // ими пользуется только владелец машины.
-func Install(dir, keyFile string) (Scripts, error) {
+//
+// Разделы machine_scope передаются в smunge-фильтр: файл вне списка
+// остаётся шифротекстом. Список пуст — фильтр расшифровывает всё, как
+// раньше: настройка machine_scope необязательна.
+func Install(dir, keyFile string, sections []string) (Scripts, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Scripts{}, fmt.Errorf("не удалось создать каталог фильтров %s: %w", dir, err)
 	}
@@ -140,7 +144,11 @@ func Install(dir, keyFile string) (Scripts, error) {
 	if err := os.WriteFile(scripts.Clean, []byte(CleanScript()), scriptMode); err != nil {
 		return Scripts{}, fmt.Errorf("не удалось записать clean-фильтр %s: %w", scripts.Clean, err)
 	}
-	if err := os.WriteFile(scripts.Smudge, []byte(SmudgeScript(keyFile)), scriptMode); err != nil {
+	smudge := SmudgeScript(keyFile)
+	if len(sections) > 0 {
+		smudge = MaterializeScript(keyFile, sections)
+	}
+	if err := os.WriteFile(scripts.Smudge, []byte(smudge), scriptMode); err != nil {
 		return Scripts{}, fmt.Errorf("не удалось записать smudge-фильтр %s: %w", scripts.Smudge, err)
 	}
 	return scripts, nil

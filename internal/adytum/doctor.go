@@ -53,7 +53,7 @@ func (a *App) Doctor() DoctorReport {
 //
 // Порядок важен: сначала то, без чего остальное не работает.
 func (a *App) doctorChecks() []Check {
-	return []Check{
+	checks := []Check{
 		a.checkTool("sops", "sops", "--version"),
 		a.checkTool("age", "age", "--version"),
 		a.checkIdentity(),
@@ -64,6 +64,8 @@ func (a *App) doctorChecks() []Check {
 		a.checkTimer(),
 		a.checkStaleness(),
 	}
+	checks = append(checks, a.registryChecks()...)
+	return checks
 }
 
 // checkTool проверяет наличие внешнего инструмента и его версию.
