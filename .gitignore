@@ -5,3 +5,5 @@
 
 # Локальное состояние adytum
 /.adytum/
+# приватные ssh-ключи — machine identity, в синк не идут
+ssh/**/id_*

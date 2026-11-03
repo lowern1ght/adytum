@@ -1,15 +1,22 @@
 # adytum: секреты шифруются sops+age при записи в git.
-# В рабочем дереве файл остаётся открытым, в репозитории — шифротекст.
-*.env filter=adytum diff=adytum
-*.yaml filter=adytum diff=adytum
-*.yml filter=adytum diff=adytum
-*.json filter=adytum diff=adytum
-
-# Конфигурация sops должна оставаться открытой, иначе sops не прочитает
-# правила шифрования.
-.sops.yaml -filter -diff
+# Scope — только директории хранилища; код и доки репозитория фильтры не трогают.
+personal/** filter=adytum diff=adytum
+nova/** filter=adytum diff=adytum
+comuki/** filter=adytum diff=adytum
+anlytra/** filter=adytum diff=adytum
+vironima/** filter=adytum diff=adytum
+keys/** filter=adytum diff=adytum
+assistant/** filter=adytum diff=adytum
+ssh/** filter=adytum diff=adytum
+tokens/** filter=adytum diff=adytum
 
 # Служебные файлы репозитория не шифруются.
+.sops.yaml -filter -diff
 .gitattributes -filter -diff
+.gitignore -filter -diff
+README.md -filter -diff
 go.mod -filter -diff
 go.sum -filter -diff
+# пустые файлы шифровать нечего
+comuki/openapi.json -filter -diff
+comuki/projects.json -filter -diff
