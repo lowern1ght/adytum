@@ -1,0 +1,17 @@
+# adytum — правила шифрования sops+age.
+#
+# Ключи-заглушки age1REPLACE_ME_* заполняются при `adytum init` из
+# ~/.adytum/recipients (метка=публичный ключ).
+#
+# personal/** доступен только машине владельца и recovery-машине,
+# остальные разделы — также машине apiarion.
+creation_rules:
+  - path_regex: '^personal[\\/]'
+    age:
+      - age1REPLACE_ME_PC
+      - age1REPLACE_ME_RECOVERY
+  - path_regex: '^.*$'
+    age:
+      - age1REPLACE_ME_PC
+      - age1REPLACE_ME_APIARION
+      - age1REPLACE_ME_RECOVERY

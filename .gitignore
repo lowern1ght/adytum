@@ -1,0 +1,7 @@
+# Сборка Go
+/adytum
+/adytum.exe
+*.exe
+
+# Локальное состояние adytum
+/.adytum/
