@@ -1,0 +1,126 @@
+# Реестр секретов
+
+`registry.yaml` — описание хранилища: какие секреты в нём есть, какого
+они типа и кто их видит. Файл лежит в корне хранилища рядом с
+`.sops.yaml` и хранится в открытом виде: описания секретов не являются
+секретами, значения в реестре нет.
+
+Реестр — единственный источник правды. `.sops.yaml` генерируется из
+него командой `adytum reencrypt`, а не редактируется руками: два файла,
+описывающие получателей, разъезжаются неизбежно, и об этом должен
+сообщать `adytum doctor`, а не пользователь.
+
+## Схема
+
+```yaml
+version: 1
+
+recipients:
+  pc: age1...            # метка машины → публичный ключ age
+
+scopes:
+  personal: [pc]         # scope → машины, которым он открыт
+  default: [pc, apiarion]
+
+entries:
+  nova/vcenter:
+    type: env            # env | yaml | json | binary | kubeconfig
+    description: vCenter API — креды terraform-провайдера
+    scope: default       # scope, определяющий получателей
+    rotates: https://vcenter.infra.hplatform.ai
+    keys:
+      VSPHERE_SERVER: hostname vCenter
+      VSPHERE_USER: учётка
+      VSPHERE_PASSWORD: пароль
+```
+
+| Раздел | Смысл |
+|---|---|
+| `version` | версия схемы; сейчас `1` |
+| `recipients` | метки машин и их публичные ключи age |
+| `scopes` | имена scopes и машины, которым они открыты |
+| `entries` | записи о секретах |
+
+### Записи (`entries`)
+
+| Поле | Обязательное | Смысл |
+|---|---|---|
+| `type` | да | формат файла секрета: `env`, `yaml`, `json`, `binary`, `kubeconfig` |
+| `description` | да | человеческое описание: что это и зачем |
+| `scope` | да | scope, определяющий, кто расшифрует файл |
+| `rotates` | нет | адрес, по которому ротируется значение |
+| `keys` | нет | имена ключей и их описания — **без значений** |
+
+Имя записи — путь файла без расширения: `nova/vcenter` описывает
+`nova/vcenter.env`. Типы `env`, `yaml` и `json` имеют ключи: значение
+достаётся по ключу (`adytum get nova/vcenter.VSPHERE_USER`). Типы
+`binary` и `kubeconfig` ключей не имеют — их читают целиком.
+
+### Scopes
+
+Имя scope совпадает с каталогом хранилища: scope `personal` открывает
+каталог `personal/`. Scope `default` — все остальные файлы, он
+применяется последним. Пустой scope (без машин) — незакрытый доступ:
+`adytum doctor` сообщает о нём отдельной проверкой.
+
+## Команды
+
+```bash
+adytum list                 # таблица записей реестра
+adytum list nova/vcenter    # подробно: описание, ключи, адрес ротации
+adytum new nova/vcenter --type env --description "..." --scope default
+adytum set nova/vcenter VSPHERE_PASSWORD --stdin
+adytum unset nova/vcenter VSPHERE_PASSWORD
+adytum grant apiarion --scope default
+adytum reencrypt            # пересобрать .sops.yaml из реестра и перешифровать
+adytum doctor               # сверка реестра, файлов и .sops.yaml
+```
+
+`adytum list` и `adytum doctor` не падают, если реестра нет: они
+сообщают, что его надо создать (`adytum new <project>/<service>`).
+
+Значения секретов в `adytum list` не показываются — описания ключей и
+адрес ротации показываются. `adytum set` принимает значение из скрытого
+ввода или из stdin (`--stdin`), но никогда из аргументов: значение в
+argv остаётся в истории оболочки и в списке процессов.
+
+## Машина и разделы (`machine_scope`)
+
+Настройка `~/.adytum/config` задаёт, какие разделы машина
+материализует в рабочем дереве:
+
+```yaml
+machine_scope:
+  - personal
+  - nova
+```
+
+Файлы вне списка остаются шифротекстом: машина не получает лишних
+данных. Настройку задаёт владелец — из меток машин её не вывести.
+`adytum init` подставляет список разделов в smunge-фильтр, поэтому
+изменение настройки требует повторного `adytum init`.
+
+## Заготовка
+
+Файл создаётся автоматически командой `adytum new`, когда реестра ещё
+нет. Его содержимое:
+
+```yaml
+# adytum — реестр секретов.
+# Файл открытый: описания секретов не являются секретами.
+# Правьте его руками или через `adytum new` и `adytum grant`.
+version: 1
+
+recipients: {}
+
+scopes:
+  personal: []
+  default: []
+
+entries: {}
+```
+
+Машины появляются в scopes через `adytum grant <label> --scope <scope>`:
+команда генерирует age-идентичность, добавляет публичный ключ в
+`recipients`, машину — в scope, пересобирает `.sops.yaml` и перешифровывает
+файлы.
