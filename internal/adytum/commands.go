@@ -38,19 +38,17 @@ type App struct {
 	JSON bool
 }
 
-// New создаёт App и определяет корень репозитория.
-func New(runner Runner) (*App, error) {
-	root, err := RepoRoot(runner, ".")
-	if err != nil {
-		return nil, err
-	}
+// New создаёт App без корня репозитория.
+//
+// Корень определяется отдельно: не всем командам он нужен, а искать
+// его впустую — значит падать там, где хранилище не требуется.
+func New(runner Runner) *App {
 	return &App{
 		Runner: runner,
-		Root:   root,
 		Now:    time.Now,
 		Out:    os.Stdout,
 		Err:    os.Stderr,
-	}, nil
+	}
 }
 
 // ui возвращает принтер основного вывода.

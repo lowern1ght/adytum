@@ -8,6 +8,12 @@ import (
 	"github.com/lowern1ght/adytum/internal/filters"
 )
 
+// FilterName — имя git-фильтра шифрования.
+//
+// Фильтр объявлен в .gitattributes: без него файл попадает в
+// репозиторий открытым.
+const FilterName = "adytum"
+
 // Gitattributes — содержимое .gitattributes, которое ставит adytum init.
 //
 // Порядок важен: последняя подходящая строка побеждает, поэтому

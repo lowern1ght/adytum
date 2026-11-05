@@ -88,12 +88,48 @@ func usageCommand(out *os.File, command, help string) {
 	fmt.Fprintf(out, "Использование:\n  adytum %s [аргументы]\n", command)
 }
 
+// needsStore сообщает, нужна ли команде корневая папка хранилища.
+//
+// unlock и identity работают с локальным состоянием машины
+// (~/.adytum), а не с хранилищем: их не должно блокировать отсутствие
+// клона репозитория.
+func needsStore(command string) bool {
+	switch command {
+	case "unlock", "identity", "version", "--version", "help", "-h", "--help":
+		return false
+	}
+	return true
+}
+
+// splitRepoFlag отделяет глобальный флаг --repo от остальных аргументов.
+//
+// Флаг указывает каталог хранилища: он нужен, когда команда запускается
+// не из хранилища.
+func splitRepoFlag(args []string) (string, []string) {
+	repo := ""
+	rest := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--repo" && index+1 < len(args):
+			repo = args[index+1]
+			index++
+		case strings.HasPrefix(arg, "--repo="):
+			repo = strings.TrimPrefix(arg, "--repo=")
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return repo, rest
+}
+
 // run разбирает аргументы и выполняет команду.
 func run(args []string) error {
 	if len(args) == 0 {
 		usage(os.Stdout)
 		return nil
 	}
+	repoFlag, args := splitRepoFlag(args)
 	command := args[0]
 	rest := args[1:]
 
@@ -116,9 +152,14 @@ func run(args []string) error {
 		}
 	}
 
-	app, err := adytum.New(adytum.Exec{})
-	if err != nil {
-		return err
+	app := adytum.New(adytum.Exec{})
+
+	// Команды, которым хранилище не нужно, работают без него: поиск
+	// корня не должен превращать их в ошибку.
+	if needsStore(command) {
+		if err := app.RequireRoot(repoFlag); err != nil {
+			return err
+		}
 	}
 
 	switch command {
@@ -541,6 +582,9 @@ func usage(out *os.File) {
 
 Использование:
   adytum <команда> [аргументы]
+
+Хранилище ищется от текущего каталога вверх. Если нужный каталог
+указан иначе — передайте --repo <путь> или задайте ADYTUM_REPO=<путь>.
 
 Команды:
   init                      подготовить склонированный репозиторий (фильтры, .sops.yaml)
