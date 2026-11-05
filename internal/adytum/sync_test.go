@@ -210,6 +210,56 @@ func TestPullErrorHidesToken(t *testing.T) {
 	}
 }
 
+// TestStalenessUsesRemoteAuth проверяет, что проверка свежести идёт с
+// теми же учётными данными, что и остальные операции с remote.
+//
+// На реплике, которая только читает, проверка без учётных данных
+// всегда падала бы: приватный репозиторий недоступен анонимно.
+func TestStalenessUsesRemoteAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	env, options, token := app.remoteAuthEnv()
+	if token == "" {
+		t.Skip("токен недоступен на этой машине")
+	}
+	if len(options) == 0 {
+		t.Error("для remote не заданы опции credential.helper")
+	}
+	if len(env) == 0 {
+		t.Error("токен не передан через окружение")
+	}
+	for _, entry := range env {
+		if strings.Contains(entry, token) {
+			t.Errorf("токен попал в аргументы окружения: %q", entry)
+		}
+	}
+}
+
+// TestAuthURLHidesTokenFromErrors проверяет, что токен не попадает в
+// текст ошибки проверки свежести.
+//
+// Git печатает URL с учётными данными: без очистки токен ушёл бы в
+// лог агентской сессии.
+func TestAuthURLHidesTokenFromErrors(t *testing.T) {
+	const token = "ghp_fake_token"
+
+	err := redactToken(errText("fatal: Authentication failed for 'https://x-access-token:"+token+"@github.com/o/r.git'"), token)
+
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("токен остался в ошибке: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "***") {
+		t.Errorf("ожидалась замена токена на маску: %q", err.Error())
+	}
+}
+
 // TestRequireUnlockBlocksGetWithoutMarker проверяет, что get закрыт
 // без маркера разблокировки.
 //

@@ -35,25 +35,36 @@ const credentialHelper = `!f() { req=$(cat); case "$req" in *host=%s*) echo user
 // Возвращается команда, аргументы и токен: токен нужен, чтобы
 // вычистить его из текста ошибки git.
 func (a *App) remoteAuth(args ...string) (Command, []string, string) {
+	env, options, token := a.remoteAuthEnv()
+	if token == "" {
+		return Command{Dir: a.Root}, args, ""
+	}
+	return Command{Dir: a.Root, Env: env}, append(options, args...), token
+}
+
+// remoteAuthEnv возвращает окружение и опции git для авторизации.
+//
+// Токен передаётся через переменную окружения, а не через аргументы:
+// аргументы команды видит любой пользователь машины через список
+// процессов. Пустой результат означает, что авторизация не нужна:
+// токена или хоста remote нет.
+func (a *App) remoteAuthEnv() ([]string, []string, string) {
 	token, err := a.githubToken()
 	host := a.remoteHost()
 	if err != nil || token == "" || host == "" {
-		return Command{Dir: a.Root}, args, ""
+		return nil, nil, ""
 	}
-	command := Command{
-		Dir: a.Root,
-		Env: []string{
-			tokenEnv + "=" + token,
-			// Без помощника git спросил бы пароль в терминале и
-			// завис: у CLI нет интерактивного режима.
-			"GIT_TERMINAL_PROMPT=0",
-		},
+	env := []string{
+		tokenEnv + "=" + token,
+		// Без помощника git спросил бы пароль в терминале и
+		// завис: у CLI нет интерактивного режима.
+		"GIT_TERMINAL_PROMPT=0",
 	}
 	options := []string{
 		"-c", "credential.helper=",
 		"-c", "credential.helper=" + fmt.Sprintf(credentialHelper, host),
 	}
-	return command, append(options, args...), token
+	return env, options, token
 }
 
 // remoteHost возвращает хост remote origin.

@@ -16,6 +16,8 @@ type fakeRunner struct {
 	responses map[string]fakeResponse
 	// calls — список выполненных команд.
 	calls [][]string
+	// envs — окружения выполненных команд.
+	envs [][]string
 }
 
 // fakeResponse — ответ на команду.
@@ -25,8 +27,9 @@ type fakeResponse struct {
 }
 
 // Run выполняет команду и возвращает заранее заданный ответ.
-func (f *fakeRunner) Run(ctx context.Context, dir string, name string, args ...string) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, args)
+	f.envs = append(f.envs, env)
 	joined := strings.Join(args, " ")
 	for key, response := range f.responses {
 		if strings.Contains(joined, key) {
@@ -34,6 +37,41 @@ func (f *fakeRunner) Run(ctx context.Context, dir string, name string, args ...s
 		}
 	}
 	return nil, errors.New("незапланированный вызов: " + joined)
+}
+
+// TestCheckUsesAuthForRemoteRequest проверяет, что сетевой запрос идёт
+// с учётными данными remote.
+//
+// Приватный репозиторий недоступен анонимно: без токена проверка
+// свежести всегда падала бы на реплике, которая только читает.
+func TestCheckUsesAuthForRemoteRequest(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"rev-parse": {out: "abc123\n"},
+		"ls-remote": {out: "abc123\trefs/heads/master\n"},
+	}}
+	checker := newChecker(t, runner, time.Now())
+	checker.AuthEnv = []string{"ADYTUM_TOKEN=secret"}
+	checker.AuthArgs = []string{"-c", "credential.helper="}
+
+	checker.Check()
+
+	found := false
+	for index, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "ls-remote") {
+			continue
+		}
+		found = true
+		if !strings.Contains(joined, "credential.helper=") {
+			t.Errorf("опции авторизации не переданы: %q", joined)
+		}
+		if len(runner.envs[index]) == 0 {
+			t.Error("токен не передан через окружение")
+		}
+	}
+	if !found {
+		t.Fatal("ls-remote не вызывался")
+	}
 }
 
 // newChecker собирает проверку с подменённым временем и кэшем.

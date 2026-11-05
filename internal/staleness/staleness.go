@@ -56,11 +56,23 @@ type Checker struct {
 	Now func() time.Time
 	// Timeout — предел ожидания сетевого ответа.
 	Timeout time.Duration
+	// AuthEnv — переменные окружения для сетевого запроса.
+	//
+	// Токен передаётся через окружение: аргументы команды видит любой
+	// пользователь машины через список процессов.
+	AuthEnv []string
+	// AuthArgs — дополнительные аргументы git для сетевого запроса.
+	AuthArgs []string
+	// Token — токен, который не должен попасть в текст ошибки.
+	Token string
 }
 
 // Runner выполняет git-команду с ограничением по времени.
+//
+// env — переменные окружения команды: пустой список означает
+// окружение вызывающего.
 type Runner interface {
-	Run(ctx context.Context, dir string, name string, args ...string) ([]byte, error)
+	Run(ctx context.Context, dir string, env []string, name string, args ...string) ([]byte, error)
 }
 
 // Check возвращает состояние локальной копии относительно remote.
@@ -77,6 +89,10 @@ func (c *Checker) Check() Result {
 }
 
 // checkRemote выполняет сетевую проверку.
+//
+// Запрос идёт с теми же учётными данными, что и остальные операции с
+// remote: без них приватный репозиторий недоступен, и проверка
+// всегда падала бы на реплике, которая только читает.
 func (c *Checker) checkRemote() Result {
 	local, err := c.localHead()
 	if err != nil {
@@ -91,9 +107,10 @@ func (c *Checker) checkRemote() Result {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	out, err := c.Runner.Run(ctx, c.Root, "git", "ls-remote", "origin", "refs/heads/"+DefaultBranch)
+	args := append(append([]string{}, c.AuthArgs...), "ls-remote", "origin", "refs/heads/"+DefaultBranch)
+	out, err := c.Runner.Run(ctx, c.Root, c.AuthEnv, "git", args...)
 	if err != nil {
-		result.Err = err
+		result.Err = redactToken(err, c.Token)
 		return result
 	}
 	remote := parseLsRemote(string(out))
@@ -111,7 +128,7 @@ func (c *Checker) checkRemote() Result {
 
 // localHead возвращает коммит локального HEAD.
 func (c *Checker) localHead() (string, error) {
-	out, err := c.Runner.Run(context.Background(), c.Root, "git", "rev-parse", "HEAD")
+	out, err := c.Runner.Run(context.Background(), c.Root, nil, "git", "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +161,7 @@ func (c *Checker) behindCount(local, remote string) int {
 func (c *Checker) revListCount(rangeSpec string) (int, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
-	out, err := c.Runner.Run(ctx, c.Root, "git", "rev-list", "--count", rangeSpec)
+	out, err := c.Runner.Run(ctx, c.Root, nil, "git", "rev-list", "--count", rangeSpec)
 	if err != nil {
 		return 0, false
 	}
@@ -153,6 +170,18 @@ func (c *Checker) revListCount(rangeSpec string) (int, bool) {
 		return 0, false
 	}
 	return count, true
+}
+
+// redactToken убирает токен из текста ошибки.
+//
+// Git печатает URL с учётными данными в сообщениях об отказе по
+// авторизации: без очистки токен попал бы в лог агентской сессии.
+func redactToken(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	message := strings.ReplaceAll(err.Error(), token, "***")
+	return fmt.Errorf("%s", message)
 }
 
 // parseLsRemote разбирает вывод git ls-remote.
