@@ -93,7 +93,7 @@ var commandHelpText = map[string]string{
 	"import":           "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
 	"status":           "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
 	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json] [--role pc|headless]",
-	"bootstrap-remote": "создать приватный репозиторий данных на GitHub и настроить remote\n               adytum bootstrap-remote [--json]",
+	"bootstrap-remote": "создать приватный репозиторий данных на GitHub и настроить remote\n               adytum bootstrap-remote [--json] [--force]",
 	"schedule":         "включить таймер автосинхронизации (systemd, раз в 5 минут, только pull)\n               adytum schedule [--json]",
 	"diff-convert":     "расшифровать файл для git diff (внутренняя команда git-фильтра)\n               adytum diff-convert <file>",
 }
@@ -597,20 +597,27 @@ func runDoctor(app *adytum.App, args []string) error {
 	return app.DoctorPrint()
 }
 
-// runBootstrapRemote выполняет bootstrap-remote [--json].
+// runBootstrapRemote выполняет bootstrap-remote [--json] [--force].
+//
+// Флаг --force разрешает перенастроить origin, уже указывающий на
+// другой адрес: без подтверждения команда отказывается, чтобы
+// секреты не уехали в чужой репозиторий.
 func runBootstrapRemote(app *adytum.App, args []string) error {
 	jsonOutput := false
+	force := false
 	for _, arg := range args {
 		switch arg {
 		case "--json":
 			jsonOutput = true
 		case "--pretty":
 			app.Pretty = true
+		case "--force":
+			force = true
 		default:
 			return fmt.Errorf("неожиданный аргумент %q", arg)
 		}
 	}
-	result, err := app.BootstrapRemote()
+	result, err := app.BootstrapRemote(force)
 	if jsonOutput {
 		return app.BootstrapJSON(result)
 	}

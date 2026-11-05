@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lowern1ght/adytum/internal/store"
+	"github.com/lowern1ght/adytum/internal/ui"
 )
 
 // GitHubAPI — адрес API GitHub.
@@ -195,7 +196,10 @@ func (c *GitHubClient) http() *http.Client {
 //
 // Токен используется только в памяти: он не попадает в git config и не
 // сохраняется на диск. Push выполняется через одноразовый URL.
-func (a *App) BootstrapRemote() (BootstrapResult, error) {
+//
+// force разрешает перенастроить origin, уже указывающий на другой
+// адрес: без подтверждения команда отказывается.
+func (a *App) BootstrapRemote(force bool) (BootstrapResult, error) {
 	tokenStore, err := a.tokenStore()
 	if err != nil {
 		return BootstrapResult{}, err
@@ -227,7 +231,7 @@ func (a *App) BootstrapRemote() (BootstrapResult, error) {
 		Created: created,
 	}
 
-	if err := a.ensureRemote(remoteURL); err != nil {
+	if err := a.ensureRemote(remoteURL, force); err != nil {
 		return result, err
 	}
 	pushed, err := a.pushWithToken(owner, token, remoteURL)
@@ -243,7 +247,11 @@ func (a *App) BootstrapRemote() (BootstrapResult, error) {
 // Если origin уже настроен на другой адрес, он переписывается: цель
 // bootstrap — привести локальную копию к каноническому адресу
 // репозитория данных.
-func (a *App) ensureRemote(url string) error {
+//
+// Переписывание требует подтверждения: нечаянно перенастроенный
+// origin отправляет секреты в чужой репозиторий. Без флага --force
+// команда отказывается и показывает оба адреса.
+func (a *App) ensureRemote(url string, force bool) error {
 	existing, err := a.gitOutput("remote", "get-url", "origin")
 	if err != nil || existing == "" {
 		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "remote", "add", "origin", url); err != nil {
@@ -253,6 +261,13 @@ func (a *App) ensureRemote(url string) error {
 	}
 	if existing == url {
 		return nil
+	}
+	if !force {
+		return advise(
+			fmt.Errorf("origin уже настроен на другой адрес: %s", existing),
+			ui.KindWarn,
+			"повторите с --force, если это правильный адрес: adytum bootstrap-remote --force",
+		)
 	}
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "remote", "set-url", "origin", url); err != nil {
 		return fmt.Errorf("не удалось перенастроить remote: %w", err)

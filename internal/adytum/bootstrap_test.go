@@ -108,6 +108,54 @@ func TestSecretsRepoName(t *testing.T) {
 	}
 }
 
+// TestEnsureRemoteRefusesToOverwriteOrigin проверяет, что перенастройка
+// origin требует подтверждения.
+//
+// Перенастроенный origin отправляет секреты в чужой
+// репозиторий: молчаливую замену адреса
+// опасно оставлять без флага.
+func TestEnsureRemoteRefusesToOverwriteOrigin(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/other/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	err := app.ensureRemote("https://github.com/owner/secrets.git", false)
+	if err == nil {
+		t.Fatal("ожидался отказ на перенастройке origin")
+	}
+	if !strings.Contains(err.Error(), "origin") {
+		t.Errorf("ошибка = %q, ожидалось упоминание origin", err.Error())
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "set-url") {
+			t.Errorf("origin перенастроен без подтверждения: %q", call)
+		}
+	}
+}
+
+// TestEnsureRemoteRepointsOriginWithForce проверяет перенастройку с
+// подтверждением.
+func TestEnsureRemoteRepointsOriginWithForce(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/other/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	if err := app.ensureRemote("https://github.com/owner/secrets.git", true); err != nil {
+		t.Fatalf("ensureRemote: %v", err)
+	}
+	found := false
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "set-url") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("origin не перенастроен")
+	}
+}
+
 // writeFile создаёт файл с указанным содержимым.
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
