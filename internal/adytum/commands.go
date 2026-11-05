@@ -462,6 +462,18 @@ func (a *App) Grant(label string, scopeName string) error {
 	if label == "" {
 		return fmt.Errorf("%w: укажите метку: adytum grant <label>", ErrUsage)
 	}
+	scope, err := a.resolveGrantScope(scopeName)
+	if err != nil {
+		return err
+	}
+	// Проверка идёт до генерации ключа: сломанный реестр должен
+	// остановить команду, а не оставить после себя половину работы.
+	// scope исключён: выдача доступа в пустой scope как раз и чинит
+	// его.
+	if err := a.requireConsistentRegistry(scope); err != nil {
+		return err
+	}
+
 	if err := Require("age-keygen"); err != nil {
 		return err
 	}
@@ -495,10 +507,6 @@ func (a *App) Grant(label string, scopeName string) error {
 		return err
 	}
 
-	scope, err := a.resolveGrantScope(scopeName)
-	if err != nil {
-		return err
-	}
 	if err := a.updateRegistry(func(document *registry.Document) error {
 		if err := document.SetRecipient(label, public); err != nil {
 			return err
@@ -565,6 +573,13 @@ func (a *App) Revoke(label string) error {
 	if _, found := recipients[label]; !found {
 		return fmt.Errorf("метка %s не найдена в реестре получателей", label)
 	}
+	if err := a.requireConsistentRegistry(""); err != nil {
+		return err
+	}
+
+	if err := a.checkRevokeScope(label); err != nil {
+		return err
+	}
 
 	if err := a.updateRegistry(func(document *registry.Document) error {
 		document.RemoveRecipient(label)
@@ -606,6 +621,21 @@ func (a *App) updateRegistry(edit func(document *registry.Document) error) error
 		return err
 	}
 	return document.Save(a.RegistryPath())
+}
+
+// requireConsistentRegistry проверяет, что реестр согласован.
+//
+// Проверка идёт до правки: сломанный реестр должен остановить команду,
+// а не остаться в файле в промежуточном состоянии.
+//
+// except — scope, который команда сейчас чинит: его собственные
+// проблемы не считаются проблемами.
+func (a *App) requireConsistentRegistry(except string) error {
+	loaded, err := a.loadRegistry()
+	if err != nil {
+		return a.registryError(err)
+	}
+	return requireRegistryConsistent(loaded, except)
 }
 
 // ensureRegistryFile создаёт файл реестра, если его ещё нет.

@@ -47,6 +47,10 @@ func (r *Registry) ResolveRecipients(local map[string]string) map[string]string 
 // Путь правила выводится из имени scope: scope «personal» покрывает
 // каталог personal/, scope «default» — всё остальное. Порядок
 // правил сохраняется, поэтому более специфичные идут первыми.
+//
+// Scope без машин правила не получает: получать ему нечем. Если на
+// такой scope ссылаются записи, перешифровка их откажет — иначе они
+// уехали бы под правило по умолчанию и получили чужих получателей.
 func GenerateSopsConfig(scopes map[string]Scope, recipients map[string]string) ([]byte, error) {
 	names := make([]string, 0, len(scopes))
 	for name := range scopes {
@@ -72,7 +76,7 @@ func GenerateSopsConfig(scopes map[string]Scope, recipients map[string]string) (
 	for _, name := range ordered {
 		scope := scopes[name]
 		if len(scope.Machines) == 0 {
-			return nil, fmt.Errorf("scope %s: машин нет — выдайте доступ: adytum grant <label> --scope %s", name, name)
+			continue
 		}
 		age := make([]string, 0, len(scope.Machines))
 		for _, machine := range scope.Machines {
@@ -88,7 +92,7 @@ func GenerateSopsConfig(scopes map[string]Scope, recipients map[string]string) (
 		})
 	}
 	if len(rules) == 0 {
-		return nil, fmt.Errorf("в реестре нет scopes: нечего генерировать")
+		return nil, fmt.Errorf("в реестре нет scopes с получателями: нечего генерировать")
 	}
 	return marshalSopsConfig(rules)
 }
@@ -128,11 +132,13 @@ func marshalSopsConfig(rules []SopsRule) ([]byte, error) {
 //
 // Карта нужна для сверки реестра с .sops.yaml: расхождение означает,
 // что правила шифрования разошлись с реестром.
+//
+// Scope без машин правила не получает — так же, как при генерации.
 func SopsRules(scopes map[string]Scope, recipients map[string]string) (map[string][]string, error) {
 	result := map[string][]string{}
 	for name, scope := range scopes {
 		if len(scope.Machines) == 0 {
-			return nil, fmt.Errorf("scope %s: машин нет — выдайте доступ: adytum grant <label> --scope %s", name, name)
+			continue
 		}
 		age := make([]string, 0, len(scope.Machines))
 		for _, machine := range scope.Machines {

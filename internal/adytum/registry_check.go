@@ -123,14 +123,17 @@ func (a *App) checkRegistryScopes(loaded *registry.Registry) Check {
 		check.Fix = "добавьте их в раздел scopes registry.yaml"
 		return check
 	}
+	// Пустой scope без записей — обычное состояние: доступ в раздел
+	// ещё не выдавали. Опасен только scope, на который ссылаются
+	// записи: их файлы уедут под правило по умолчанию.
 	var empty []string
 	for _, name := range loaded.ScopeNames() {
-		if len(loaded.Scopes[name].Machines) == 0 {
+		if len(loaded.Scopes[name].Machines) == 0 && loaded.ScopeHasEntries(name) {
 			empty = append(empty, name)
 		}
 	}
 	if len(empty) > 0 {
-		check.Detail = "без машин: " + strings.Join(empty, ", ")
+		check.Detail = "пуст, entries не определены: " + strings.Join(empty, ", ")
 		check.Fix = "выдайте им доступ: adytum grant <label> --scope <scope>"
 		return check
 	}

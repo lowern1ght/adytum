@@ -30,6 +30,13 @@ func (a *App) Reencrypt(confirmed bool) error {
 	if err != nil {
 		return a.registryError(err)
 	}
+	// Проверка идёт до генерации .sops.yaml: правило для scope,
+	// которого нет в реестре, не создаётся, и файл уезжает под
+	// правило по умолчанию — к чужим получателям.
+	if err := requireRegistryConsistent(loaded, ""); err != nil {
+		return err
+	}
+
 	recipients := loaded.ResolveRecipients(a.localRecipients())
 
 	content, err := registry.GenerateSopsConfig(loaded.Scopes, recipients)

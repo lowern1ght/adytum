@@ -223,10 +223,6 @@ func Parse(data []byte) (*Registry, error) {
 
 	for name, machines := range document.Scopes {
 		scope := Scope{Name: name, Machines: append([]string(nil), machines...)}
-		if len(scope.Machines) == 0 {
-			registry.Errors = append(registry.Errors,
-				fmt.Sprintf("scope %s не содержит машин", name))
-		}
 		registry.Scopes[name] = scope
 	}
 
@@ -359,6 +355,20 @@ func (r *Registry) UnknownScopes() []string {
 	}
 	sort.Strings(unknown)
 	return unknown
+}
+
+// ScopeHasEntries сообщает, ссылаются ли записи реестра на scope.
+//
+// Scope без записей никому не нужен: его можно удалить без последствий.
+// Scope с записями удалять нельзя — записи останутся без определённых
+// получателей.
+func (r *Registry) ScopeHasEntries(scope string) bool {
+	for _, entry := range r.Entries {
+		if entry.Scope == scope {
+			return true
+		}
+	}
+	return false
 }
 
 // UnknownMachines возвращает метки машин, для которых нет публичного
