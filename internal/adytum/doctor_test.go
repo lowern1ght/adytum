@@ -28,7 +28,8 @@ func newTestApp(t *testing.T, runner Runner, root string) *App {
 //
 // Проверка инструментов зависит от машины, поэтому берётся любая
 // непрошедшая проверка: у remote в пустом репозитории подсказка
-// должна быть всегда.
+// должна быть всегда. Пропущенные проверки (неприменимые к профилю
+// машины) подсказки не требуют.
 func TestDoctorReportsFailedChecksWithHints(t *testing.T) {
 	app := newTestApp(t, &fakeRunner{}, t.TempDir())
 
@@ -38,7 +39,7 @@ func TestDoctorReportsFailedChecksWithHints(t *testing.T) {
 		t.Error("отчёт без инструментов не может быть успешным")
 	}
 	for _, check := range report.Checks {
-		if check.OK {
+		if check.Status == StatusSkip || check.OK {
 			continue
 		}
 		if check.Fix == "" {
@@ -150,6 +151,80 @@ func TestDoctorChecksFilterScripts(t *testing.T) {
 		return
 	}
 	t.Fatal("проверка git-фильтров не найдена")
+}
+
+// TestDoctorSkipsTimerOnPCCheck проверяет, что таймер не проверяется на
+// pc-машине.
+//
+// На pc-машине таймера нет, и его отсутствие — не поломка: проверка
+// всегда была бы красной и делала отчёт бесполезным.
+func TestDoctorSkipsTimerOnPCCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	app := newTestApp(t, &fakeRunner{}, t.TempDir())
+	app.Role = "pc"
+
+	for _, check := range app.Doctor().Checks {
+		if check.Name != "таймер" {
+			continue
+		}
+		if check.Status != StatusSkip {
+			t.Errorf("статус проверки таймера = %q, ожидался skip", check.Status)
+		}
+		return
+	}
+	t.Fatal("проверка таймера не найдена")
+}
+
+// TestDoctorChecksTimerOnHeadlessCheck проверяет, что на фоновой машине
+// таймер проверяется.
+//
+// Фоновая машина живёт таймером: без него реплика молча перестаёт
+// обновляться.
+func TestDoctorChecksTimerOnHeadlessCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	app := newTestApp(t, &fakeRunner{}, t.TempDir())
+	app.Role = "headless"
+
+	for _, check := range app.Doctor().Checks {
+		if check.Name != "таймер" {
+			continue
+		}
+		if check.Status == StatusSkip {
+			t.Error("проверка таймера пропущена на фоновой машине")
+		}
+		return
+	}
+	t.Fatal("проверка таймера не найдена")
+}
+
+// TestDoctorReportsUnverifiableStalenessAsSkip проверяет, что
+// непроверяемая свежесть не делает отчёт неуспешным.
+//
+// Сеть может лежать, а remote — быть недоступен: чинить здесь нечего,
+// и красный отчёт только сбивает с толку.
+func TestDoctorReportsUnverifiableStalenessAsSkip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	app := newTestApp(t, &fakeRunner{}, t.TempDir())
+
+	for _, check := range app.Doctor().Checks {
+		if check.Name != "свежесть секретов" {
+			continue
+		}
+		if check.Status != StatusSkip {
+			t.Errorf("статус проверки свежести = %q, ожидался skip", check.Status)
+		}
+		return
+	}
+	t.Fatal("проверка свежести не найдена")
 }
 
 // TestDoctorUsesExistingScripts проверяет, что установленные скрипты

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/adytum"
+	"github.com/lowern1ght/adytum/internal/machine"
 	"github.com/lowern1ght/adytum/internal/registry"
 	"github.com/lowern1ght/adytum/internal/ui"
 )
@@ -67,7 +68,7 @@ var commandHelpText = map[string]string{
 	"reencrypt":        "перешифровать секреты по правилам реестра\n               adytum reencrypt [--yes]",
 	"import":           "перенести plaintext-хранилище в репозиторий\n               adytum import <dir>",
 	"status":           "показать ветку, remote, получателей, разблокировку и git-фильтры\n               adytum status [--json]",
-	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json]",
+	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json] [--role pc|headless]",
 	"bootstrap-remote": "создать приватный репозиторий данных на GitHub и настроить remote\n               adytum bootstrap-remote [--json]",
 	"schedule":         "включить таймер автосинхронизации (systemd, раз в 5 минут, только pull)\n               adytum schedule [--json]",
 }
@@ -510,7 +511,10 @@ func runStatus(app *adytum.App, args []string) error {
 	return app.Status()
 }
 
-// runDoctor выполняет doctor [--json] [--pretty].
+// runDoctor выполняет doctor [--json] [--pretty] [--role].
+//
+// Флаг --role задаёт профиль машины явно: без файла настройки роль
+// выводится из окружения, и на машине без systemd её не угадать.
 func runDoctor(app *adytum.App, args []string) error {
 	jsonOutput := false
 	for _, arg := range args {
@@ -519,9 +523,19 @@ func runDoctor(app *adytum.App, args []string) error {
 			jsonOutput = true
 		case "--pretty":
 			app.Pretty = true
+		case "--role":
+			return errors.New("указание: adytum doctor --role pc|headless")
 		default:
+			if strings.HasPrefix(arg, "--role=") {
+				app.Role = strings.TrimPrefix(arg, "--role=")
+				continue
+			}
 			return fmt.Errorf("неожиданный аргумент %q", arg)
 		}
+	}
+	if app.Role != "" && !machine.Role(app.Role).Valid() {
+		return fmt.Errorf("неизвестная роль %q (допустимо: %s, %s)",
+			app.Role, machine.RolePC, machine.RoleHeadless)
 	}
 	app.JSON = jsonOutput
 	return app.DoctorPrint()
@@ -603,7 +617,7 @@ func usage(out *os.File) {
   reencrypt                 перешифровать секреты по текущим правилам
   import <dir>              перенести plaintext-хранилище в репозиторий
   status [--json]           показать состояние репозитория
-  doctor [--json]           проверить окружение и исправить найденное
+  doctor [--json]           проверить окружение и показать отчёт
   bootstrap-remote [--json] создать приватный репозиторий данных на GitHub
   schedule [--json]         включить таймер автосинхронизации (systemd)
 

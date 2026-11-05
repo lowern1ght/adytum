@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lowern1ght/adytum/internal/machine"
 	"github.com/lowern1ght/adytum/internal/sopsconf"
 	"github.com/lowern1ght/adytum/internal/staleness"
 	"github.com/lowern1ght/adytum/internal/store"
@@ -19,11 +20,27 @@ type Check struct {
 	Name string `json:"name"`
 	// OK — проверка пройдена.
 	OK bool `json:"ok"`
+	// Status — состояние проверки: ok, fail или skip.
+	//
+	// skip означает «неприменимо»: на pc-машине таймер systemd не
+	// нужен, и его отсутствие — не поломка. Такие проверки не делают
+	// отчёт неуспешным.
+	Status string `json:"status"`
 	// Detail — подробности: версия, путь, значение.
 	Detail string `json:"detail"`
 	// Fix — что сделать, если проверка не пройдена.
 	Fix string `json:"fix,omitempty"`
 }
+
+// Состояния проверки.
+const (
+	// StatusOK — проверка пройдена.
+	StatusOK = "ok"
+	// StatusFail — проверка выявила проблему.
+	StatusFail = "fail"
+	// StatusSkip — проверка неприменима к этой машине.
+	StatusSkip = "skip"
+)
 
 // DoctorReport — полный отчёт самодиагностики.
 type DoctorReport struct {
@@ -38,15 +55,36 @@ type DoctorReport struct {
 // Проверяются: наличие и версии внешних инструментов, идентичность
 // машины, git-фильтры, конфигурация sops, remote, маркер
 // разблокировки, таймер автосинхронизации и свежесть секретов.
+//
+// Проверки, неприменимые к профилю машины, помечаются как skip и не
+// делают отчёт неуспешным: отсутствие таймера systemd на pc-машине —
+// не поломка.
 func (a *App) Doctor() DoctorReport {
 	report := DoctorReport{OK: true}
 	for _, check := range a.doctorChecks() {
+		check = withStatus(check)
 		report.Checks = append(report.Checks, check)
-		if !check.OK {
+		if check.Status == StatusFail {
 			report.OK = false
 		}
 	}
 	return report
+}
+
+// withStatus дописывает состояние проверке, если оно не задано.
+//
+// Проверки объявляют успех полем OK; состояние выводится из него.
+// Неприменимые проверки помечают себя сами — им Status не мешает.
+func withStatus(check Check) Check {
+	if check.Status != "" {
+		return check
+	}
+	if check.OK {
+		check.Status = StatusOK
+	} else {
+		check.Status = StatusFail
+	}
+	return check
 }
 
 // doctorChecks собирает список проверок.
@@ -267,8 +305,17 @@ func (a *App) checkUnlock() Check {
 }
 
 // checkTimer проверяет таймер автосинхронизации.
+//
+// На pc-машине таймер не нужен: там синхронизация запускается руками.
+// Проверка помечается как skip, а не как ошибка, иначе doctor на
+// pc-машине всегда был бы красным.
 func (a *App) checkTimer() Check {
 	check := Check{Name: "таймер"}
+	if a.role() != machine.RoleHeadless {
+		check.Status = StatusSkip
+		check.Detail = "не применимо: роль " + a.role().String()
+		return check
+	}
 	active, err := a.timerActive()
 	if err != nil {
 		check.Detail = "не настроен"
@@ -286,12 +333,16 @@ func (a *App) checkTimer() Check {
 }
 
 // checkStaleness проверяет свежесть локальной копии секретов.
+//
+// Неудачная проверка — не поломка: сеть может лежать, а remote может
+// быть недоступен этой машине. Проверка помечается как skip, и doctor
+// остаётся успешным: чинить здесь нечего.
 func (a *App) checkStaleness() Check {
 	check := Check{Name: "свежесть секретов"}
 	result := a.stalenessChecker().Check()
 	if result.Err != nil {
+		check.Status = StatusSkip
 		check.Detail = "не удалось проверить: " + result.Err.Error()
-		check.Fix = "проверьте доступ к remote: adytum sync"
 		return check
 	}
 	if result.Stale() {
@@ -332,18 +383,24 @@ func (a *App) DoctorJSON() error {
 // DoctorText печатает отчёт самодиагностики таблицей.
 //
 // Каждая строка — проверка, её результат и подсказка, что делать при
-// неудаче.
+// неудаче. Неприменимые проверки помечаются пропуском: они не
+// считаются проблемами и не тянут за собой подсказку.
 func (a *App) DoctorText() error {
 	report := a.Doctor()
 	printer := a.ui()
 	for _, check := range report.Checks {
-		if check.OK {
-			printer.OK("%-18s %s", check.Name, check.Detail)
+		switch check.Status {
+		case StatusSkip:
+			printer.Plain("%-18s %s (пропущено)", check.Name, check.Detail)
 			continue
-		}
-		printer.Fail("%-18s %s", check.Name, check.Detail)
-		if check.Fix != "" {
-			printer.Hint("%s", check.Fix)
+		case StatusFail:
+			printer.Fail("%-18s %s", check.Name, check.Detail)
+			if check.Fix != "" {
+				printer.Hint("%s", check.Fix)
+			}
+			continue
+		default:
+			printer.OK("%-18s %s", check.Name, check.Detail)
 		}
 	}
 	if report.OK {
