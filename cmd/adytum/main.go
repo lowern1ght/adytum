@@ -21,6 +21,18 @@ import (
 // version — версия CLI.
 const version = "0.1.0"
 
+// Коды возврата.
+//
+// Разные коды позволяют автоматике отличать «гейт закрыт, жди
+// владельца» от «что-то сломалось»: первый — состояние, второй —
+// ошибка.
+const (
+	// exitError — команда завершилась ошибкой.
+	exitError = 1
+	// exitLocked — операция закрыта маркером разблокировки.
+	exitLocked = 2
+)
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		// Отчёт самопроверки уже напечатан: повторять его в stderr
@@ -29,8 +41,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "adytum:", err)
 			printAdvice(err)
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor возвращает код возврата для ошибки.
+//
+// Закрытый гейт разблокировки — не поломка: команда не выполнилась
+// по понятной причине, и её стоит повторить позже. Свой код
+// возврата отличает это состояние от настоящей ошибки.
+func exitCodeFor(err error) int {
+	if errors.Is(err, adytum.ErrUnlockRequired) {
+		return exitLocked
+	}
+	return exitError
 }
 
 // printAdvice печатает подсказку «что делать» для ошибки.
