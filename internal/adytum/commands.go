@@ -351,8 +351,9 @@ func looksEncrypted(content []byte) bool {
 // Если файл зашифрован, расшифровка выполняется в памяти: plaintext
 // никогда не попадает во временные файлы.
 //
-// Ошибка расшифровки на машине без доступа к разделу превращается в
-// понятное сообщение: это ожидаемое состояние, а не поломка.
+// Ошибка расшифровки разбирается по существу: «машины нет в правиле»
+// — ожидаемое состояние, «машина в правиле, но расшифровка не удалась»
+// — порча файла или перешифровка без этой машины.
 func (a *App) readPlaintext(path string) ([]byte, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -368,6 +369,9 @@ func (a *App) readPlaintext(path string) ([]byte, error) {
 	plain, err := sops.DecryptFile(path)
 	if err != nil {
 		if isNotRecipient(err.Error()) {
+			if a.recipientStateOf(path) == recipientPresent {
+				return nil, corruptedSecretError(err)
+			}
 			return nil, notRecipientError(err)
 		}
 		return nil, err
