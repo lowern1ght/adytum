@@ -11,23 +11,72 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-// UNLOCK_TTL_MS — срок жизни маркера разблокировки в миллисекундах.
-// Должен совпадать со сроком в store.UnlockTTL (8 часов).
-const UNLOCK_TTL_MS = 8 * 60 * 60 * 1000
-
 // ADYTUM_BIN — исполняемый файл CLI. Переопределяется переменной
 // окружения, иначе используется adytum из PATH.
 const ADYTUM_BIN = process.env.ADYTUM_BIN || "adytum"
+
+// FALLBACK_UNLOCK_TTL_MS — срок жизни маркера, когда CLI не смог
+// сообщить свой.
+//
+// Используется только со старым CLI, который не умеет отдавать
+// статус в JSON: без этого fallback плагин отказывал бы в работе
+// там, где раньше работал.
+const FALLBACK_UNLOCK_TTL_MS = 8 * 60 * 60 * 1000
 
 // unlockPath — путь к маркеру разблокировки.
 function unlockPath() {
   return join(homedir(), ".adytum", "unlocked")
 }
 
+// unlockTTL_MS — срок жизни маркера в миллисекундах.
+//
+// TTL задаёт машина, и он меняется: жёстко зашитое значение в
+// плагине расходилось с настройкой машины. Источник — отчёт CLI;
+// запрос выполняется один раз за вызов.
+let cachedTTL = null
+
+async function unlockTTLMS() {
+  if (cachedTTL !== null) return cachedTTL
+  const result = await runAdytum(["status", "--json"])
+  if (result.ok) {
+    try {
+      const payload = JSON.parse(result.output)
+      const ttl = payload?.unlock?.ttl
+      if (typeof ttl === "string" && ttl.length > 0) {
+        const parsed = parseDurationMS(ttl)
+        if (parsed !== null) {
+          cachedTTL = parsed
+          return cachedTTL
+        }
+      }
+    } catch {
+      // битый JSON — как будто ответа не было
+    }
+  }
+  cachedTTL = FALLBACK_UNLOCK_TTL_MS
+  return cachedTTL
+}
+
+// parseDurationMS переводит длительность Go ("24h0m0s") в миллисекунды.
+//
+// Формат совпадает с тем, что печатает time.Duration: значение нужно
+// разобрать без внешних зависимостей.
+function parseDurationMS(text) {
+  const pattern = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$/
+  const match = pattern.exec(text.trim())
+  if (!match) return null
+  const hours = Number(match[1] || 0)
+  const minutes = Number(match[2] || 0)
+  const seconds = Number(match[3] || 0)
+  if (!hours && !minutes && !seconds) return null
+  return hours * 3600000 + minutes * 60000 + seconds * 1000
+}
+
 // unlockedState возвращает состояние разблокировки.
 //
 // Маркер отсутствует, просрочен или нечитаем — операции запрещены.
-function unlockedState() {
+async function unlockedState() {
+  const ttl = await unlockTTLMS()
   const path = unlockPath()
   if (!existsSync(path)) return { unlocked: false, reason: "маркер разблокировки не найден" }
   let stamp
@@ -37,7 +86,7 @@ function unlockedState() {
     return { unlocked: false, reason: "маркер разблокировки нечитаем" }
   }
   if (Number.isNaN(stamp)) return { unlocked: false, reason: "маркер разблокировки повреждён" }
-  const remaining = stamp + UNLOCK_TTL_MS - Date.now()
+  const remaining = stamp + ttl - Date.now()
   if (remaining <= 0) return { unlocked: false, reason: "срок разблокировки истёк" }
   return { unlocked: true, remaining }
 }
@@ -47,10 +96,7 @@ function unlockedState() {
 // Формулировка совпадает с подсказкой CLI: агент видит одну и ту же
 // формулировку независимо от точки входа.
 function unlockMessage(reason) {
-  return [
-    `adytum: операция отклокирована — ${reason}.`,
-    "🔒 попроси владельца: adytum unlock (TTL 8h)",
-  ].join(" ")
+  return [`adytum: операция отклокирована — ${reason}.`, "🔒 попроси владельца: adytum unlock"].join(" ")
 }
 
 // runAdytum выполняет CLI adytum и возвращает stdout.
@@ -134,7 +180,7 @@ async function setupV2(ctx) {
     editor.add({
       ...TOOL_DEFINITIONS[0],
       async execute(input) {
-        const state = unlockedState()
+        const state = await unlockedState()
         if (!state.unlocked) return { content: unlockMessage(state.reason) }
         if (!input.project || !input.service) return { content: "adytum: укажите проект и сервис" }
         const result = await runAdytum(getArgs(input))
@@ -144,7 +190,7 @@ async function setupV2(ctx) {
     editor.add({
       ...TOOL_DEFINITIONS[1],
       async execute(input) {
-        const state = unlockedState()
+        const state = await unlockedState()
         if (!state.unlocked) return { content: unlockMessage(state.reason) }
         if (!input.command) return { content: "adytum: укажите команду" }
         const result = await runAdytum(runArgs(input))
@@ -170,7 +216,7 @@ export const AdytumPlugin = async () => {
           key: tool.schema.string().optional().describe("ключ внутри секрета; если не задан — весь файл"),
         },
         async execute(args) {
-          const state = unlockedState()
+          const state = await unlockedState()
           if (!state.unlocked) return unlockMessage(state.reason)
           if (!args.project || !args.service) return "adytum: укажите проект и сервис"
           const result = await runAdytum(getArgs(args))
@@ -184,7 +230,7 @@ export const AdytumPlugin = async () => {
           env: tool.schema.array(tool.schema.string()).optional().describe("список секретов в виде project/service"),
         },
         async execute(args) {
-          const state = unlockedState()
+          const state = await unlockedState()
           if (!state.unlocked) return unlockMessage(state.reason)
           if (!args.command) return "adytum: укажите команду"
           const result = await runAdytum(runArgs(args))
