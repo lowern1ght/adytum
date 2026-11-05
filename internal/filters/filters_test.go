@@ -2,6 +2,7 @@ package filters
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,112 @@ func TestCleanScriptPassesEmptyFileThrough(t *testing.T) {
 	}
 	if !strings.Contains(script, "sops encrypt --filename-override") {
 		t.Error("clean-фильтр должен шифровать через sops")
+	}
+}
+
+// TestCleanScriptPassesCiphertextThrough проверяет, что clean-фильтр не
+// шифрует уже зашифрованное.
+//
+// Машина-не-получатель получает blob через smunge-фолбэк как есть:
+// повторное шифрование дало бы другой blob, дерево оставалось бы
+// вечно грязным, а операции git падали бы.
+func TestCleanScriptPassesCiphertextThrough(t *testing.T) {
+	script := CleanScript()
+
+	if !strings.Contains(script, "sops_[A-Za-z0-9_]+=") {
+		t.Error("clean-фильтр должен распознавать метаданные sops в env-файле")
+	}
+	if !strings.Contains(script, "sops:") {
+		t.Error("clean-фильтр должен распознавать метаданные sops в yaml")
+	}
+	if !strings.Contains(script, `"sops":`) {
+		t.Error("clean-фильтр должен распознавать метаданные sops в json")
+	}
+}
+
+// TestCleanScriptDetectsCiphertextBeforeEncrypting проверяет порядок
+// проверок.
+//
+// Распознавание шифротекста должно идти до шифрования: иначе sops
+// получил бы шифротекст на вход и упал бы.
+func TestCleanScriptDetectsCiphertextBeforeEncrypting(t *testing.T) {
+	script := CleanScript()
+
+	detect := strings.Index(script, "grep -qE")
+	encrypt := strings.Index(script, "sops encrypt")
+	if detect < 0 || encrypt < 0 {
+		t.Fatalf("в скрипте нет проверки шифротекста или шифрования: %s", script)
+	}
+	if detect > encrypt {
+		t.Error("проверка шифротекста должна идти до шифрования")
+	}
+}
+
+// findShell ищет POSIX-шелл для запуска скриптов фильтров.
+//
+// На Windows шелл из Git-for-Windows лежит вовне не в PATH: поиск теста
+// пропускает, но тест не падает. Если шелла нет вовсе — тест
+// пропускается.
+func findShell(t *testing.T) string {
+	t.Helper()
+	if path, err := exec.LookPath("sh"); err == nil {
+		return path
+	}
+	for _, candidate := range []string{
+		`C:\Program Files\Git\usr\bin\sh.exe`,
+		`C:\Program Files (x86)\Git\usr\bin\sh.exe`,
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	t.Skip("POSIX-шелл недоступен на этой машине")
+	return ""
+}
+
+// TestCleanScriptIsIdempotentOnCiphertext проверяет, что clean-фильтр не
+// шифрует уже зашифрованное.
+//
+// Машина-не-получатель получает blob как есть через
+// smudge-фолбэк: повторное шифрование шифротекста дало бы
+// другой blob, и дерево осталась бы вечно грязным.
+//
+// Сторона проверяет, что шифрование вовсе не
+// вызывается: стуб sops падает с ошибкой, и шифротекст
+// выводится без изменений.
+func TestCleanScriptIsIdempotentOnCiphertext(t *testing.T) {
+	sh := findShell(t)
+
+	dir := t.TempDir()
+	stubDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(stubDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stub := filepath.Join(stubDir, "sops")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho 'sops не должен быть вызван' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ciphertext := "TOKEN=ENC[AES256_GCM,data:abc,iv:iv,tag:tag,type:str]\nsops_age__list_0__map_recipient=age1example\nsops_version=3.8.1\n"
+
+	scriptPath := filepath.Join(dir, CleanName)
+	if err := os.WriteFile(scriptPath, []byte(CleanScript()), 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	command := exec.Command(sh, scriptPath, "secret.env")
+	command.Stdin = strings.NewReader(ciphertext)
+	// В PATH должны каталог шелла: поддельные утилиты
+	// (mktemp, tr, grep) лежат рядом с ним, а не в папке Git-for-Windows.
+	searchPath := stubDir + string(os.PathListSeparator) + filepath.Dir(sh) + string(os.PathListSeparator) + os.Getenv("PATH")
+	command.Env = append(os.Environ(), "PATH="+searchPath)
+
+	out, err := command.Output()
+	if err != nil {
+		t.Fatalf("фильтр отработал ошибку: %v", err)
+	}
+	if string(out) != ciphertext {
+		t.Errorf("шифротекст изменён:\nполучено: %q\nожидалось: %q", ciphertext, string(out))
 	}
 }
 

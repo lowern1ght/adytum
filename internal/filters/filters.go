@@ -75,6 +75,17 @@ if [ -z "$(tr -d '[:space:]' < "$tmp_in")" ]; then
 	exit 0
 fi
 
+# Уже зашифрованный вход отдаём как есть.
+#
+# Машина-не-получатель получила blob как есть через smudge-фолбэк:
+# повторное шифрование шифротекста дало бы другой blob, и дерево
+# оставалось бы вечно грязным. Признаки метаданных sops: префикс
+# sops_* в env, ключ sops: в yaml и "sops": в json.
+if grep -qE '(^[[:space:]]*sops_[A-Za-z0-9_]+=|^[[:space:]]*sops:|^[[:space:]]*"sops":)' "$tmp_in" 2>/dev/null; then
+	cat "$tmp_in"
+	exit 0
+fi
+
 # Ошибка шифрования не должна приводить к plaintext в индексе: при
 # неудаче фильтр падает, и операция git откатывается.
 sops encrypt --filename-override "$file" < "$tmp_in"
