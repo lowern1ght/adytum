@@ -16,7 +16,8 @@ import (
 // правки без участия человека он не должен.
 func TestSyncPullOnlyNeverPushes(t *testing.T) {
 	runner := &fakeRunner{responses: map[string]fakeResponse{
-		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+		"remote get-url":     {out: "https://github.com/owner/secrets.git"},
+		"rev-parse --abbrev": {out: "master"},
 	}}
 	app := newTestApp(t, runner, t.TempDir())
 
@@ -32,11 +33,49 @@ func TestSyncPullOnlyNeverPushes(t *testing.T) {
 	}
 }
 
+// TestSyncPullOnlyResetsToOrigin проверяет, что pull-only обновляет
+// ветку до состояния origin.
+//
+// Рабочее дерево реплики всегда «грязное»: smunge-фильтр кладёт
+// шифротекст вместо расшифрованного файла, и обычный pull на нём
+// абортится («would be overwritten»). Реплика забирает изменения
+// принудительно.
+func TestSyncPullOnlyResetsToOrigin(t *testing.T) {
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url":     {out: "https://github.com/owner/secrets.git"},
+		"rev-parse --abbrev": {out: "master"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	if err := app.Sync(true); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	fetched := false
+	reset := false
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "fetch origin") {
+			fetched = true
+		}
+		if strings.Contains(joined, "reset --hard origin/master") {
+			reset = true
+		}
+	}
+	if !fetched {
+		t.Error("pull-only не выполнил fetch origin")
+	}
+	if !reset {
+		t.Error("pull-only не выполнил reset --hard origin/master")
+	}
+}
+
 // TestSyncPushesWhenNotPullOnly проверяет обычный режим: изменения
 // отправляются.
 func TestSyncPushesWhenNotPullOnly(t *testing.T) {
 	runner := &fakeRunner{responses: map[string]fakeResponse{
-		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+		"remote get-url":     {out: "https://github.com/owner/secrets.git"},
+		"rev-parse --abbrev": {out: "master"},
 	}}
 	app := newTestApp(t, runner, t.TempDir())
 

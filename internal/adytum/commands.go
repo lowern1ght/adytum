@@ -207,7 +207,12 @@ func (a *App) Sync(pullOnly bool) error {
 	if remote == "" {
 		a.println("remote не настроен: синхронизация только с локальным репозиторием")
 		a.hint("%s", AdviceRemote)
+	} else if pullOnly {
+		if err := a.fetchReset(); err != nil {
+			return fmt.Errorf("не удалось получить изменения: %w", err)
+		}
 	} else if err := a.pull(); err != nil {
+		a.hint("pull не завершён: разберитесь с конфликтами вручную и повторите: git status")
 		return fmt.Errorf("не удалось получить изменения: %w", err)
 	}
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "checkout", "--", "."); err != nil {
@@ -227,6 +232,30 @@ func (a *App) Sync(pullOnly bool) error {
 	}
 	a.println("репозиторий синхронизирован")
 	a.hint("проверьте состояние: adytum status")
+	return nil
+}
+
+// fetchReset обновляет ветку до состояния origin без слияния.
+//
+// Рабочее дерево реплики всегда «грязное»: smunge-фильтр кладёт
+// шифротекст вместо расшифрованного файла, и git считает файл
+// изменённым. Обычный pull на таком дереве абортится («would be
+// overwritten»), поэтому реплика забирает изменения принудительно:
+// fetch + reset --hard.
+//
+// reset безопасен: у реплики нет своих правок — она только читает.
+func (a *App) fetchReset() error {
+	command, args, token := a.remoteAuth("fetch", "origin")
+	if _, err := a.Runner.Run(command, "git", args...); err != nil {
+		return redactToken(err, token)
+	}
+	branch, err := a.gitOutput("rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil || branch == "" {
+		return fmt.Errorf("не удалось определить текущую ветку")
+	}
+	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "reset", "--hard", "origin/"+branch); err != nil {
+		return fmt.Errorf("не удалось обновить ветку %s: %w", branch, err)
+	}
 	return nil
 }
 
