@@ -548,9 +548,10 @@ func (a *App) Grant(label string, scopeName string) error {
 	}); err != nil {
 		return err
 	}
-	if err := a.Reencrypt(true); err != nil {
+	if _, err := a.reencryptAll(); err != nil {
 		return err
 	}
+
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): grant access to %s", label)); err != nil {
 		return err
 	}
@@ -627,9 +628,10 @@ func (a *App) Revoke(label string) error {
 	if err := store.SaveRecipients(recipients); err != nil {
 		return err
 	}
-	if err := a.Reencrypt(true); err != nil {
+	if _, err := a.reencryptAll(); err != nil {
 		return err
 	}
+
 	if err := a.commitAndPush(fmt.Sprintf("[.stbl](feat/adytum): revoke access for %s", label)); err != nil {
 		return err
 	}
