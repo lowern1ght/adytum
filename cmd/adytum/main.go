@@ -85,7 +85,7 @@ var commandHelpText = map[string]string{
 	"edit":             "открыть секрет в $EDITOR\n               adytum edit <project>/<service>",
 	"new":              "создать новый секрет: файл, запись в реестре и коммит\n               adytum new <project>/<service> [--type env|yaml|json|binary|kubeconfig]\n                                    [--description \"описание\"] [--scope <scope>]",
 	"run":              "выполнить команду с секретами в окружении\n               adytum run --env <project>/<service> -- <команда> [аргументы...]",
-	"unlock":           "разрешить агентским сессиям операции get и run на 8 часов",
+	"unlock":           "разрешить агентским сессиям операции get и run (срок — в настройке машины)",
 	"identity":         "указать, какой локальный ключ принадлежит этой машине\n               adytum identity <label>",
 	"grant":            "создать age-идентичность и выдать доступ\n               adytum grant <label> [--scope <scope>]",
 	"revoke":           "отозвать доступ и перешифровать файлы\n               adytum revoke <label>",
@@ -95,6 +95,7 @@ var commandHelpText = map[string]string{
 	"doctor":           "проверить окружение: sops, age, идентичность, фильтры, .sops.yaml, remote\n               adytum doctor [--json] [--role pc|headless]",
 	"bootstrap-remote": "создать приватный репозиторий данных на GitHub и настроить remote\n               adytum bootstrap-remote [--json]",
 	"schedule":         "включить таймер автосинхронизации (systemd, раз в 5 минут, только pull)\n               adytum schedule [--json]",
+	"diff-convert":     "расшифровать файл для git diff (внутренняя команда git-фильтра)\n               adytum diff-convert <file>",
 }
 
 // hasHelpFlag сообщает, есть ли среди аргументов флаг справки.
@@ -207,7 +208,7 @@ func run(args []string) error {
 	case "run":
 		return runRun(app, rest)
 	case "unlock":
-		return app.Unlock()
+		return runUnlock(app, rest)
 	case "identity":
 		return runIdentity(app, rest)
 	case "grant":
@@ -269,8 +270,10 @@ func runGet(app *adytum.App, args []string) error {
 	if len(targets) == 0 {
 		return errors.New("указание: adytum get <project>/<service>[.<KEY>]")
 	}
-	target := targets[0]
-	project, service, key, err := splitKey(target)
+	if len(targets) > 1 {
+		return fmt.Errorf("указание: adytum get <project>/<service>[.<KEY>] (получено %d адреса)", len(targets))
+	}
+	project, service, key, err := splitKey(app, targets[0])
 	if err != nil {
 		return err
 	}
@@ -282,11 +285,20 @@ func runGet(app *adytum.App, args []string) error {
 
 // splitKey отделяет ключ от пути вида <project>/<service>.<KEY>.
 //
-// Расширения файлов (.env, .yaml, .json) ключами не считаются.
-func splitKey(target string) (string, string, string, error) {
+// Имя сервиса может содержать точки (vpn.amnezia), поэтому сначала
+// проверяется, не является ли весь адрес именем файла. Расширения
+// (.env, .yaml, .json) ключами не считаются.
+//
+// Если после отделения ключа в имени остаются точки, ключ содержал бы
+// точки: такие ключи не поддерживаются, и разбирать адрес молча
+// нельзя — иначе агент получит не тот секрет.
+func splitKey(app *adytum.App, target string) (string, string, string, error) {
 	project, service, err := adytum.SplitTarget(target)
 	if err != nil {
 		return "", "", "", err
+	}
+	if app.SecretFileExists(project, service) {
+		return project, service, "", nil
 	}
 	dot := strings.LastIndex(service, ".")
 	if dot <= 0 {
@@ -295,6 +307,9 @@ func splitKey(target string) (string, string, string, error) {
 	name, key := service[:dot], service[dot+1:]
 	if key == "" || adytum.IsSecretExt("."+key) {
 		return project, service, "", nil
+	}
+	if strings.Contains(name, ".") {
+		return "", "", "", errors.New("ключи с точками не поддерживаются: переименуйте ключ или укажите имя сервиса с его расширением")
 	}
 	return project, name, key, nil
 }
@@ -445,6 +460,23 @@ func runRun(app *adytum.App, args []string) error {
 		return errors.New("указание: adytum run --env <project>/<service> -- <команда> [аргументы...]")
 	}
 	return app.Run(envs, command)
+}
+
+// runUnlock выполняет unlock.
+//
+// Лишние аргументы — ошибка: unlock ничего не принимает, и молча
+// проигнорированный аргумент выглядит как «я всё сделал правильно».
+func runUnlock(app *adytum.App, args []string) error {
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			usageCommand(os.Stdout, "unlock", commandHelpText["unlock"])
+			return nil
+		default:
+			return fmt.Errorf("неожиданный аргумент %q", arg)
+		}
+	}
+	return app.Unlock()
 }
 
 // runIdentity выполняет identity <label>.
