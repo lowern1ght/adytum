@@ -106,23 +106,68 @@ func TestPullUsesCredentialsFileWhenPresent(t *testing.T) {
 	}
 }
 
-// TestAuthURLHidesTokenFromErrors проверяет, что токен не попадает в
-// текст ошибки.
+// TestPullKeepsTokenOutOfArguments проверяет, что токен не попадает в
+// аргументы git.
 //
-// Git печатает URL с учётными данными: без очистки токен ушёл бы в
-// лог.
-func TestAuthURLHidesTokenFromErrors(t *testing.T) {
+// Аргументы команды видит любой пользователь машины через список
+// процессов: токен в них — это токен в логах всей системы.
+func TestPullKeepsTokenOutOfArguments(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
 	runner := &fakeRunner{responses: map[string]fakeResponse{
 		"remote get-url": {out: "https://github.com/owner/secrets.git"},
 	}}
 	app := newTestApp(t, runner, t.TempDir())
 
-	authURL, err := app.authURL()
-	if err == nil {
+	command, args, token := app.remoteAuth("pull", "--rebase")
+
+	if token == "" {
 		t.Skip("токен недоступен на этой машине")
 	}
-	if strings.Contains(authURL, "x-access-token") {
-		t.Errorf("URL = %q, ожидался URL без токена", authURL)
+	for _, arg := range args {
+		if strings.Contains(arg, token) {
+			t.Errorf("токен попал в аргументы: %q", arg)
+		}
+	}
+	envToken := ""
+	for _, entry := range command.Env {
+		if strings.HasPrefix(entry, tokenEnv+"=") {
+			envToken = strings.TrimPrefix(entry, tokenEnv+"=")
+		}
+	}
+	if envToken != token {
+		t.Errorf("токен в окружении = %q, ожидался %q", envToken, token)
+	}
+}
+
+// TestPullErrorHidesToken проверяет, что токен не попадает в текст
+// ошибки.
+//
+// Git печатает URL с учётными данными: без очистки токен ушёл бы в
+// лог агентской сессии.
+func TestPullErrorHidesToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"remote get-url": {out: "https://github.com/owner/secrets.git"},
+	}}
+	app := newTestApp(t, runner, t.TempDir())
+
+	_, _, token := app.remoteAuth("pull", "--rebase")
+	if token == "" {
+		t.Skip("токен недоступен на этой машине")
+	}
+
+	err := redactToken(errText("fatal: Authentication failed for 'https://x-access-token:"+token+"@github.com/o/r.git'"), token)
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("токен остался в ошибке: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "***") {
+		t.Errorf("ожидалась замена токена на маску: %q", err.Error())
 	}
 }
 

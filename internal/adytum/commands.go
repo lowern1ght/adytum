@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,10 +233,11 @@ func (a *App) Sync(pullOnly bool) error {
 // pull забирает изменения с remote.
 //
 // Для приватного remote нужен доступ. Он берётся из ~/.git-credentials,
-// если файл есть; иначе используется одноразовый URL с токеном из
-// локального хранилища: токен не попадает ни в git config, ни на диск.
+// если файл есть; иначе токен из локального хранилища передаётся
+// помощнику учётных данных через переменную окружения: в аргументах
+// git токена нет, а значит, он не виден в списке процессов.
 //
-// smudge-фильтр при этом не должен ломать pull на машине без полного
+// smunge-фильтр при этом не должен ломать pull на машине без полного
 // доступа: недоступные разделы остаются шифротекстом, а операция
 // проходит.
 func (a *App) pull() error {
@@ -247,17 +247,9 @@ func (a *App) pull() error {
 		}
 		return nil
 	}
-	url, err := a.authURL()
-	if err != nil {
-		// Без токена pull приватного remote невозможен, но это не
-		// повод падать: обычный pull справится и без него.
-		if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "pull", "--rebase"); err != nil {
-			return err
-		}
-		return nil
-	}
-	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "-c", "credential.helper=", "pull", "--rebase", url); err != nil {
-		return err
+	command, args, token := a.remoteAuth("pull", "--rebase")
+	if _, err := a.Runner.Run(command, "git", args...); err != nil {
+		return redactToken(err, token)
 	}
 	return nil
 }
@@ -270,28 +262,6 @@ func (a *App) hasGitCredentials() bool {
 	}
 	info, err := os.Stat(filepath.Join(home, ".git-credentials"))
 	return err == nil && !info.IsDir() && info.Size() > 0
-}
-
-// authURL собирает URL remote с токеном для одноразового использования.
-//
-// Токен не сохраняется: URL живёт только в аргументах команды.
-//
-// Формат x-access-token:<token>@ — тот, который GitHub принимает для
-// токенов доступа.
-func (a *App) authURL() (string, error) {
-	remote, err := a.gitOutput("remote", "get-url", "origin")
-	if err != nil || remote == "" {
-		return "", fmt.Errorf("remote не настроен")
-	}
-	scheme, rest, found := strings.Cut(remote, "://")
-	if !found {
-		return "", fmt.Errorf("remote %s не поддерживается", remote)
-	}
-	token, err := a.githubToken()
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s://x-access-token:%s@%s", scheme, url.PathEscape(token), rest), nil
 }
 
 // githubToken достаёт токен GitHub из локального хранилища.

@@ -3,7 +3,6 @@ package adytum
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -280,18 +279,6 @@ func (a *App) pushWithToken(owner, token, remoteURL string) (bool, error) {
 		return false, fmt.Errorf("не удалось отправить изменения: %w", redactToken(err, token))
 	}
 	return true, nil
-}
-
-// redactToken убирает токен из текста ошибки.
-//
-// Git печатает URL с учётными данными в сообщениях об отказе по
-// авторизации: без очистки токен попал бы в вывод команды.
-func redactToken(err error, token string) error {
-	if err == nil || token == "" {
-		return err
-	}
-	message := strings.ReplaceAll(err.Error(), token, "***")
-	return errors.New(message)
 }
 
 // tokenStore собирает источник токена GitHub.
