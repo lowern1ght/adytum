@@ -191,3 +191,51 @@ entries:
 		t.Errorf("emptied = %v, ожидался пустой список", emptied)
 	}
 }
+
+// TestRevokeRefusesToEmptyScopeWithEntries проверяет, что отзыв
+// последней машины раздела с записями отказывается.
+//
+// Отзыв оставил бы раздел без получателей, и его файлы уехали бы под
+// правило по умолчанию — к чужим машинам. Отказ безопаснее тихой
+// эскалации доступа.
+func TestRevokeRefusesToEmptyScopeWithEntries(t *testing.T) {
+	root := t.TempDir()
+	writeRegistryFixture(t, root, `version: 1
+
+recipients:
+  pc: age1pcpublickey
+
+scopes:
+  default: [pc]
+  personal: [pc]
+
+entries:
+  personal/github:
+    type: env
+    description: GitHub PAT
+    scope: personal
+    keys:
+      TOKEN: токен
+`)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	stateDir := filepath.Join(home, ".adytum")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "recipients"), []byte("pc=age1pcpublickey\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	app := newTestApp(t, &fakeRunner{}, root)
+
+	err := app.Revoke("pc")
+	if err == nil {
+		t.Fatal("ожидался отказ от отзыва последней машины раздела с записями")
+	}
+	if !strings.Contains(err.Error(), "personal") {
+		t.Errorf("ошибка = %q, ожидалось упоминание раздела", err.Error())
+	}
+}
