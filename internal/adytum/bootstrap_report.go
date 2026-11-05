@@ -3,6 +3,8 @@ package adytum
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 )
 
 // BootstrapJSON печатает результат bootstrap-remote в машинночитаемом виде.
@@ -59,6 +61,12 @@ func (a *App) SchedulePrint() error {
 	printer.OK("таймер %s установлен, период %s", result.Unit, result.Interval)
 	printer.Plain("юнит: %s", TimerService)
 	printer.Hint("таймер только забирает изменения: adytum sync --pull-only")
+	if result.Linger != "" {
+		printer.Plain("linger: %s", result.Linger)
+	}
+	if strings.HasPrefix(result.Linger, "не удалось") {
+		printer.Hint("без linger таймер не стартует: systemctl enable-linger %s", os.Getenv("USER"))
+	}
 	return nil
 }
 

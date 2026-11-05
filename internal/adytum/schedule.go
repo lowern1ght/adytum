@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/lowern1ght/adytum/internal/machine"
 )
 
 // TimerUnit — имя systemd-таймера автосинхронизации.
@@ -29,6 +31,11 @@ type ScheduleResult struct {
 	System bool `json:"system"`
 	// Active — таймер активен.
 	Active bool `json:"active"`
+	// Linger — включён ли linger для пользователя.
+	//
+	// linger нужен фоновой машине: без него пользовательские юниты
+	// не стартуют, пока никто не вошёл в сессию.
+	Linger string `json:"linger,omitempty"`
 	// Reason — почему таймер не установлен (если не удалось).
 	Reason string `json:"reason,omitempty"`
 }
@@ -85,7 +92,27 @@ func (a *App) Schedule() (ScheduleResult, error) {
 	}
 	result.Installed = true
 	result.Active = true
+	result.Linger = a.enableLinger()
 	return result, nil
+}
+
+// enableLinger включает linger для текущего пользователя.
+//
+// Фоновая машина живёт без входа в сессию: пользовательские юниты
+// systemd без linger не стартуют, и таймер молча не работает. На
+// интерактивной машине linger не нужен, поэтому там не включается.
+func (a *App) enableLinger() string {
+	if a.role() != machine.RoleHeadless {
+		return "не требуется"
+	}
+	user := os.Getenv("USER")
+	if user == "" {
+		return "не удалось: неизвестен пользователь"
+	}
+	if _, err := a.Runner.Run(Command{}, "loginctl", "enable-linger", user); err != nil {
+		return "не удалось: " + err.Error()
+	}
+	return "включён"
 }
 
 // systemdUserDir возвращает каталог пользовательских юнитов systemd.
@@ -105,21 +132,35 @@ func (a *App) systemdUserDir() (string, error) {
 //
 // ExecStart выполняет только pull: изменения из таймера не уходят на
 // remote.
+//
+// Environment=HOME обязателен: без него systemd запускает юнит с
+// пустым HOME, и CLI не находит ни ~/.adytum, ни ключ машины.
+//
+// WorkingDirectory указывает на хранилище: иначе git ищет репозиторий
+// от корня файловой системы и падает.
+//
+// After=network-online.target ждёт сеть: без сети первый запуск
+// таймера падает, и systemd откладывает его на сутки.
 func (a *App) serviceUnit(binary string) string {
 	return fmt.Sprintf(`[Unit]
 Description=adytum: автосинхронизация секретов (только pull)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
+Environment=HOME=%s
 WorkingDirectory=%s
 ExecStart=%s sync --pull-only
-`, a.Root, binary)
+`, a.homeDir(), a.Root, binary)
 }
 
 // timerUnit возвращает текст systemd-таймера.
 func (a *App) timerUnit() string {
 	return fmt.Sprintf(`[Unit]
 Description=adytum: таймер автосинхронизации секретов
+After=network-online.target
+Wants=network-online.target
 
 [Timer]
 OnBootSec=%s
@@ -129,6 +170,18 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 `, SyncInterval, SyncInterval)
+}
+
+// homeDir возвращает домашний каталог машины.
+//
+// Значение подставляется в Environment= юнита: systemd не знает, где
+// HOME пользователя, а без него CLI не найдёт состояние машины.
+func (a *App) homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/root"
+	}
+	return strings.ReplaceAll(home, "\\", "/")
 }
 
 // ScheduleStatus возвращает текущее состояние таймера.
