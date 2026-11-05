@@ -87,6 +87,27 @@ adytum identity <label>
 Метка записывается в `~/.adytum/identity`. Через неё CLI находит
 приватный ключ и передаёт его sops.
 
+## 5.1 Задать профиль машины
+
+Файл `~/.adytum/config` описывает машину:
+
+```yaml
+machine_scope:
+  - personal
+  - nova
+role: pc            # pc | headless
+pull_only: true     # машина только забирает изменения
+unlock_ttl: 24h     # срок жизни маркера разблокировки
+```
+
+`role: headless` — для фоновой машины: без него `adytum doctor` не
+проверяет таймер systemd и не считает его отсутствие поломкой. Если
+файла нет, роль определяется по наличию `systemctl` в PATH.
+
+`machine_scope` задаёт разделы, которые машина материализует открытым
+текстом. Изменение списка требует повторного `adytum init`: список
+подставляется в smunge-фильтр.
+
 ## 6. Инициализировать репозиторий
 
 ```bash
@@ -168,6 +189,29 @@ adytum schedule
 выполняет `adytum sync --pull-only`. Только pull — таймер никогда не
 публикует локальные правки без участия человека.
 
+Юниты получаются такими:
+
+```ini
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+WorkingDirectory=/srv/secrets
+ExecStart=/usr/local/bin/adytum sync --pull-only
+```
+
+`Environment=HOME` обязателен: без него systemd запускает юнит с
+пустым HOME, и CLI не находит ни `~/.adytum`, ни ключ машины.
+`WorkingDirectory` указывает на хранилище: иначе git ищет репозиторий
+от корня файловой системы и падает.
+
+На фоновой машине пользовательским таймерам нужен linger: без него
+юниты не стартуют, пока никто не вошёл в сессию. `adytum schedule`
+включает linger сам и сообщает, если не смог.
+
 В режиме `--pull-only` изменения забираются принудительно (`git fetch
 origin` + `git reset --hard origin/<ветка>`). Рабочее дерево реплики
 всегда «грязное»: smunge-фильтр кладёт шифротекст вместо
@@ -184,8 +228,28 @@ origin` + `git reset --hard origin/<ветка>`). Рабочее дерево �
 adytum unlock
 ```
 
-Маркер `~/.adytum/unlocked` живёт 8 часов. Пока он есть, разрешены
+Маркер `~/.adytum/unlocked` живёт сутки (срок задаётся в
+`~/.adytum/config`, ключ `unlock_ttl`). Пока он есть, разрешены
 `adytum get`, `adytum run` и инструменты плагина opencode.
+
+На фоновой машине маркер продлевает отдельный таймер, который
+периодически выполняет `adytum unlock`. `adytum schedule` ставит только
+таймер синхронизации; юнит разблокировки владелец заводит сам:
+
+```ini
+[Unit]
+Description=adytum: продление разблокировки
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+WorkingDirectory=/srv/secrets
+ExecStart=/usr/local/bin/adytum unlock
+```
+
+Сутки вместо нескольких часов — из-за тиков: один пропущенный запуск
+таймера (перезагрузка, сон, задержка сети) закрыл бы гейт до
+следующего тика.
 
 ## 9. Проверить доступ
 
