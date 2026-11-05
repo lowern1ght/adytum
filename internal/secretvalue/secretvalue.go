@@ -137,7 +137,14 @@ func Keys(format Format, content []byte) ([]string, error) {
 //
 // Строки сохраняются как есть: комментарии и порядок не меняются,
 // иначе diff в хранилище превратился бы в шум.
+//
+// Многострочное значение в формате env невозможно: файл читается
+// построчно, и перенос строки разорвал бы запись на две. Такие
+// секреты хранятся в формате yaml или json.
 func setEnv(content []byte, key, value string) ([]byte, error) {
+	if strings.ContainsAny(value, "\n\r") {
+		return nil, fmt.Errorf("многострочное значение не поддерживается в формате env: используйте тип yaml или json")
+	}
 	lines := strings.Split(string(content), "\n")
 	replaced := false
 	for index, line := range lines {
