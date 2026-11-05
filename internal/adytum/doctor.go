@@ -241,16 +241,24 @@ func (a *App) checkRemote() Check {
 }
 
 // checkUnlock проверяет состояние маркера разблокировки.
+//
+// Подсказка зависит от профиля: на интерактивной машине маркер
+// продлевает владелец командой, на фоновой — перезапуском сервиса.
 func (a *App) checkUnlock() Check {
 	check := Check{Name: "разблокировка"}
-	state, err := store.Unlock(a.Now())
+	state, err := store.Unlock(a.Now(), a.unlockTTL())
 	if err != nil {
-		check.Fix = "adytum unlock"
+		check.Fix = unlockAdvice(a.role())
+		return check
+	}
+	if state.Broken {
+		check.Detail = "маркер нечитаем"
+		check.Fix = unlockAdvice(a.role())
 		return check
 	}
 	if !state.Unlocked {
 		check.Detail = "не активна"
-		check.Fix = "adytum unlock"
+		check.Fix = unlockAdvice(a.role())
 		return check
 	}
 	check.OK = true

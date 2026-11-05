@@ -105,7 +105,7 @@ func (a *App) requireReencryptPermission(confirmed bool) error {
 	if confirmed {
 		return nil
 	}
-	state, err := store.Unlock(a.Now())
+	state, err := store.Unlock(a.Now(), a.unlockTTL())
 	if err != nil {
 		return err
 	}

@@ -22,8 +22,14 @@ const (
 	IdentityFileName = "identity"
 	// UnlockFileName — маркер разблокировки для агентских сессий.
 	UnlockFileName = "unlocked"
-	// UnlockTTL — срок жизни маркера разблокировки.
-	UnlockTTL = 8 * time.Hour
+	// DefaultUnlockTTL — срок жизни маркера разблокировки по умолчанию.
+	//
+	// Сутки, а не несколько часов: таймер разблокировки на фоновой
+	// машине срабатывает раз в несколько часов, и один пропущенный тик
+	// (перезагрузка, сон, задержка сети) закрывал бы гейт до следующего
+	// тика. Машина доверенная — маркер защищает от утечки значения в
+	// лог агентской сессии, а не от злоумышленника на самой машине.
+	DefaultUnlockTTL = 24 * time.Hour
 	// BinDirName — подкаталог со скриптами git-фильтров.
 	BinDirName = "bin"
 )
@@ -221,6 +227,11 @@ func PublicKeyFromIdentity(path string) (string, error) {
 type UnlockState struct {
 	// Unlocked — маркер существует и не истёк.
 	Unlocked bool
+	// Broken — маркер есть, но прочитать его не удалось.
+	//
+	// Это не то же самое, что «маркера нет»: сломанный маркер означает,
+	// что разблокировку не обновили, и машина ждёт владельца.
+	Broken bool
 	// ExpiresAt — момент истечения (только если маркер существует).
 	ExpiresAt time.Time
 	// Remaining — оставшееся время (только если маркер действителен).
@@ -228,7 +239,10 @@ type UnlockState struct {
 }
 
 // Unlock читает состояние маркера разблокировки.
-func Unlock(now time.Time) (UnlockState, error) {
+//
+// ttl — срок жизни маркера: он задаётся настройкой машины, потому что
+// фоновая машина обновляет маркер по таймеру, а интерактивная — вручную.
+func Unlock(now time.Time, ttl time.Duration) (UnlockState, error) {
 	path, err := UnlockPath()
 	if err != nil {
 		return UnlockState{}, err
@@ -242,9 +256,9 @@ func Unlock(now time.Time) (UnlockState, error) {
 	}
 	stamp, err := time.Parse(time.RFC3339, strings.TrimSpace(string(content)))
 	if err != nil {
-		return UnlockState{}, nil
+		return UnlockState{Broken: true}, nil
 	}
-	expires := stamp.Add(UnlockTTL)
+	expires := stamp.Add(ttl)
 	remaining := expires.Sub(now)
 	return UnlockState{
 		Unlocked:  remaining > 0,
@@ -254,7 +268,9 @@ func Unlock(now time.Time) (UnlockState, error) {
 }
 
 // WriteUnlock создаёт (или обновляет) маркер разблокировки.
-func WriteUnlock(now time.Time) (time.Time, error) {
+//
+// ttl — срок жизни маркера: по истечении он считается недействительным.
+func WriteUnlock(now time.Time, ttl time.Duration) (time.Time, error) {
 	path, err := UnlockPath()
 	if err != nil {
 		return time.Time{}, err
@@ -265,7 +281,7 @@ func WriteUnlock(now time.Time) (time.Time, error) {
 	if err := os.WriteFile(path, []byte(now.Format(time.RFC3339)+"\n"), 0o600); err != nil {
 		return time.Time{}, err
 	}
-	return now.Add(UnlockTTL), nil
+	return now.Add(ttl), nil
 }
 
 // sortedLabels возвращает метки в алфавитном порядке.

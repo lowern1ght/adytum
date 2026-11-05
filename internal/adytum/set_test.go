@@ -39,7 +39,7 @@ func newUnlockedApp(t *testing.T, root string) *App {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	if _, err := store.WriteUnlock(time.Now()); err != nil {
+	if _, err := store.WriteUnlock(time.Now(), store.DefaultUnlockTTL); err != nil {
 		t.Fatalf("WriteUnlock: %v", err)
 	}
 

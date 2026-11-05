@@ -1,9 +1,10 @@
-package scope
+package machine
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // withHome подставляет временный домашний каталог.
@@ -69,6 +70,43 @@ func TestLoadRejectsBrokenFile(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnknownRole(t *testing.T) {
+	home := withHome(t)
+	if err := os.MkdirAll(filepath.Join(home, ".adytum"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".adytum", FileName), []byte("role: server\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := Load(); err == nil {
+		t.Fatal("ожидалась ошибка неизвестной роли")
+	}
+}
+
+// TestLoadReadsRoleAndPullOnly проверяет чтение профиля машины.
+//
+// Профиль задаёт владелец: по нему doctor решает, какие проверки
+// применимы, а sync — можно ли публиковать изменения.
+func TestLoadReadsRoleAndPullOnly(t *testing.T) {
+	withHome(t)
+
+	if err := Save(Config{Role: RoleHeadless, PullOnly: true}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if config.Role != RoleHeadless {
+		t.Errorf("роль = %q, ожидалась %q", config.Role, RoleHeadless)
+	}
+	if !config.PullOnly {
+		t.Error("pull_only не прочитан")
+	}
+}
+
 func TestSaveSortsAndDeduplicates(t *testing.T) {
 	withHome(t)
 
@@ -108,5 +146,38 @@ func TestAllowsRejectsEmptySection(t *testing.T) {
 
 	if config.Allows("") {
 		t.Error("пустой раздел не должен быть разрешён")
+	}
+}
+
+// TestTTLDefaultsToGivenValue проверяет запасной срок.
+//
+// Пустая настройка не должна оставлять машину с нулевым гейтом:
+// дефолт приходит от вызывающего.
+func TestTTLDefaultsToGivenValue(t *testing.T) {
+	config := Config{}
+
+	if got := config.TTL(24 * time.Hour); got != 24*time.Hour {
+		t.Errorf("TTL = %v, ожидалось 24h", got)
+	}
+}
+
+// TestTTLReadsConfiguredDuration проверяет чтение срока из настройки.
+func TestTTLReadsConfiguredDuration(t *testing.T) {
+	config := Config{UnlockTTL: "6h"}
+
+	if got := config.TTL(24 * time.Hour); got != 6*time.Hour {
+		t.Errorf("TTL = %v, ожидалось 6h", got)
+	}
+}
+
+// TestTTLIgnoresBrokenValue проверяет запасной путь для битой настройки.
+//
+// Битый срок опаснее отсутствующего: нулевой гейт закрывает операции
+// навсегда, дефолт — только на сутки.
+func TestTTLIgnoresBrokenValue(t *testing.T) {
+	config := Config{UnlockTTL: "неделя"}
+
+	if got := config.TTL(24 * time.Hour); got != 24*time.Hour {
+		t.Errorf("TTL = %v, ожидалось 24h", got)
 	}
 }

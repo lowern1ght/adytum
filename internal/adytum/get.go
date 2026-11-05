@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/lowern1ght/adytum/internal/envfile"
+	"github.com/lowern1ght/adytum/internal/machine"
 	"github.com/lowern1ght/adytum/internal/registry"
-	"github.com/lowern1ght/adytum/internal/scope"
 	"github.com/lowern1ght/adytum/internal/secretvalue"
 	"github.com/lowern1ght/adytum/internal/ui"
 )
@@ -197,6 +197,6 @@ func (a *App) requireInScope(path string) error {
 }
 
 // machineScope читает настройку доступа машины.
-func (a *App) machineScope() (scope.Config, error) {
-	return scope.Load()
+func (a *App) machineScope() (machine.Config, error) {
+	return machine.Load()
 }

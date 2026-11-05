@@ -2,7 +2,6 @@ package adytum
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,8 +10,8 @@ import (
 	"time"
 
 	"github.com/lowern1ght/adytum/internal/filters"
+	"github.com/lowern1ght/adytum/internal/machine"
 	"github.com/lowern1ght/adytum/internal/registry"
-	"github.com/lowern1ght/adytum/internal/scope"
 	"github.com/lowern1ght/adytum/internal/sopsconf"
 	"github.com/lowern1ght/adytum/internal/staleness"
 	"github.com/lowern1ght/adytum/internal/store"
@@ -35,6 +34,11 @@ type App struct {
 	Pretty bool
 	// JSON — машинночитаемый вывод (флаг --json).
 	JSON bool
+	// Role — переопределение роли машины (флаг --role).
+	//
+	// Переопределение нужно там, где роль выводится из окружения и
+	// может быть определена неверно: doctor на машине без systemd.
+	Role string
 }
 
 // New создаёт App без корня репозитория.
@@ -183,7 +187,7 @@ func (a *App) installFilters(keyFile string) (filters.Scripts, error) {
 	if err != nil {
 		return filters.Scripts{}, err
 	}
-	config, err := scope.Load()
+	config, err := machine.Load()
 	if err != nil {
 		return filters.Scripts{}, err
 	}
@@ -399,14 +403,14 @@ func (a *App) stageFile(path string) error {
 // Без маркера операции get и run закрыты: их вывод может попасть в лог
 // агентской сессии.
 func (a *App) requireUnlock() error {
-	state, err := store.Unlock(a.Now())
+	state, err := store.Unlock(a.Now(), a.unlockTTL())
 	if err != nil {
 		return err
 	}
 	if state.Unlocked {
 		return nil
 	}
-	return unlockError()
+	return unlockError(a.role())
 }
 
 // staleHint предупреждает, что локальная копия секретов отстала.
@@ -469,10 +473,11 @@ func (a *App) Edit(project, service string) error {
 
 // Unlock создаёт маркер разблокировки для агентских сессий.
 //
-// Маркер живёт 8 часов (store.UnlockTTL) и разрешает плагину выполнять
-// операции get и run.
+// Маркер живёт столько, сколько задано профилем машины (по умолчанию
+// сутки) и разрешает плагину выполнять операции get и run.
 func (a *App) Unlock() error {
-	expires, err := store.WriteUnlock(a.Now())
+	ttl := a.unlockTTL()
+	expires, err := store.WriteUnlock(a.Now(), ttl)
 	if err != nil {
 		return err
 	}
@@ -756,107 +761,6 @@ func (a *App) Import(dir string) error {
 	}
 	a.printf("импортировано файлов: %d\n", len(copied))
 	return nil
-}
-
-// StatusReport — состояние репозитория в машинночитаемом виде.
-type StatusReport struct {
-	// Branch — текущая ветка.
-	Branch string `json:"branch"`
-	// Remote — адрес remote origin.
-	Remote string `json:"remote"`
-	// Recipients — публичные ключи получателей из .sops.yaml.
-	Recipients []string `json:"recipients"`
-	// Unlock — состояние маркера разблокировки.
-	Unlock UnlockReport `json:"unlock"`
-	// Filters — настроенные git-фильтры adytum.
-	Filters map[string]string `json:"filters"`
-}
-
-// UnlockReport — состояние маркера разблокировки.
-type UnlockReport struct {
-	// Active — маркер действует.
-	Active bool `json:"active"`
-	// ExpiresAt — момент истечения маркера.
-	ExpiresAt string `json:"expires_at,omitempty"`
-}
-
-// Status печатает состояние репозитория.
-//
-// Показывает ветку, remote, получателей из .sops.yaml, состояние
-// маркера разблокировки и наличие git-фильтров.
-func (a *App) Status() error {
-	report := a.statusReport()
-	printer := a.ui()
-	printer.Plain("ветка:    %s", orUnknown(report.Branch))
-	printer.Plain("remote:   %s", orUnknown(report.Remote))
-	if len(report.Recipients) == 0 {
-		printer.Plain("получатели: не заданы")
-	}
-	for _, recipient := range report.Recipients {
-		printer.Plain("получатель: %s", recipient)
-	}
-	if report.Unlock.Active {
-		printer.Plain("разблокировка: активна до %s", report.Unlock.ExpiresAt)
-	} else {
-		printer.Plain("разблокировка: не активна")
-		printer.Hint("%s", AdviceUnlock)
-	}
-	for _, key := range []string{"filter.adytum.clean", "filter.adytum.smudge", "filter.adytum.required"} {
-		value, ok := report.Filters[key]
-		if !ok || value == "" {
-			printer.Plain("git %s: не настроен", key)
-			continue
-		}
-		printer.Plain("git %s: %s", key, value)
-	}
-	a.staleHint(a.out())
-	return nil
-}
-
-// StatusJSON печатает состояние репозитория в машинночитаемом виде.
-func (a *App) StatusJSON() error {
-	encoded, err := json.MarshalIndent(a.statusReport(), "", "  ")
-	if err != nil {
-		return err
-	}
-	a.println(string(encoded))
-	return nil
-}
-
-// statusReport собирает состояние репозитория.
-func (a *App) statusReport() StatusReport {
-	branch, _ := a.gitOutput("rev-parse", "--abbrev-ref", "HEAD")
-	remote, _ := a.gitOutput("remote", "get-url", "origin")
-
-	report := StatusReport{
-		Branch:  branch,
-		Remote:  remote,
-		Filters: map[string]string{},
-	}
-
-	content, err := os.ReadFile(SopsConfigPath(a.Root))
-	if err == nil {
-		if config, parseErr := sopsconf.Parse(content); parseErr == nil {
-			report.Recipients = config.Recipients()
-		}
-	}
-
-	state, err := store.Unlock(a.Now())
-	if err == nil && state.Unlocked {
-		report.Unlock = UnlockReport{
-			Active:    true,
-			ExpiresAt: state.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
-		}
-	}
-
-	for _, key := range []string{"filter.adytum.clean", "filter.adytum.smudge", "filter.adytum.required"} {
-		value, err := a.gitOutput("config", "--get", key)
-		if err != nil {
-			continue
-		}
-		report.Filters[key] = value
-	}
-	return report
 }
 
 // DiffConvert — textconv-драйвер для git diff.

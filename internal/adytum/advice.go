@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lowern1ght/adytum/internal/machine"
 	"github.com/lowern1ght/adytum/internal/ui"
 )
 
@@ -59,7 +60,13 @@ func advise(err error, icon ui.Kind, text string) error {
 // агент видит одну и ту же подсказку независимо от точки входа.
 const (
 	// AdviceUnlock — операция закрыта маркером разблокировки.
-	AdviceUnlock = "попроси владельца: adytum unlock (TTL 8h)"
+	AdviceUnlock = "попроси владельца: adytum unlock"
+	// AdviceUnlockHeadless — та же подсказка для фоновой машины.
+	//
+	// На фоновой машине разблокировку продлевает таймер: интерактивная
+	// команда там некуда выполнять, а перезапуск сервиса делает
+	// владелец по SSH или через сам таймер.
+	AdviceUnlockHeadless = "попроси владельца: systemctl restart adytum-unlock.service"
 	// AdviceRemote — remote не настроен.
 	AdviceRemote = "adytum bootstrap-remote"
 	// AdviceNotRecipient — машина не в списке получателей.
@@ -90,13 +97,20 @@ var ErrUnlockRequired = errors.New("операция закрыта: нет ак
 var ErrDoctorFailed = errors.New("проверки не пройдены")
 
 // unlockError возвращает ошибку с подсказкой про разблокировку.
-func unlockError() error {
-	return advise(ErrUnlockRequired, ui.KindLock, AdviceUnlock)
+//
+// Подсказка зависит от роли машины: на интерактивной машине разблокировку
+// продлевает владелец командой, на фоновой — перезапуском сервиса,
+// который делает то же самое по таймеру.
+func unlockError(role machine.Role) error {
+	return advise(ErrUnlockRequired, ui.KindLock, unlockAdvice(role))
 }
 
-// remoteError возвращает ошибку с подсказкой про bootstrap-remote.
-func remoteError() error {
-	return advise(errors.New("remote не настроен"), ui.KindArrow, AdviceRemote)
+// unlockAdvice возвращает подсказку про разблокировку для роли машины.
+func unlockAdvice(role machine.Role) string {
+	if role == machine.RoleHeadless {
+		return AdviceUnlockHeadless
+	}
+	return AdviceUnlock
 }
 
 // notRecipientError возвращает ошибку с подсказкой про получателей.
