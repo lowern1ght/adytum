@@ -67,6 +67,12 @@ func (e Exec) RunContext(ctx context.Context, cmd Command, name string, args ...
 }
 
 // run выполняет команду и собирает её вывод.
+//
+// Успех определяется кодом возврата: stderr — это диагностика (git
+// пишет в неё предупреждения и прогресс), и её непустота не должна
+// превращать успешную команду в ошибку. Текст stderr подставляется в
+// сообщение об ошибке, когда команда всё-таки завершилась с
+// ненулевым кодом.
 func (Exec) run(ctx context.Context, cmd Command, name string, args ...string) ([]byte, error) {
 	program := exec.CommandContext(ctx, name, args...)
 	program.Dir = cmd.Dir
