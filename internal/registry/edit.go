@@ -113,7 +113,10 @@ func (d *Document) AddToScope(scope, label string) error {
 
 // RemoveFromScope убирает машину из scope.
 //
-// Пустой scope удаляется: scope без машин смысла не имеет.
+// Scope без машин не удаляется: записи, ссылающиеся на него, потеряли
+// бы определённых получателей и уехали бы под правило по умолчанию —
+// под чужих. Оставшийся пустой scope видно в doctor отдельной
+// проверкой.
 func (d *Document) RemoveFromScope(scope, label string) {
 	section := d.section("scopes")
 	if section == nil {
@@ -131,9 +134,6 @@ func (d *Document) RemoveFromScope(scope, label string) {
 		kept = append(kept, item)
 	}
 	value.Content = kept
-	if len(value.Content) == 0 {
-		removeMapValue(section, scope)
-	}
 }
 
 // SetEntry добавляет или заменяет запись реестра.
