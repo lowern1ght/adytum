@@ -424,6 +424,10 @@ func (a *App) Edit(project, service string) error {
 		a.println("изменений нет")
 		return nil
 	}
+	if err := a.requireEncryptedPath(relativeTo(a.Root, path)); err != nil {
+		return err
+	}
+
 	if err := a.writePlaintext(path, []byte(edited)); err != nil {
 		return err
 	}
@@ -694,6 +698,12 @@ func (a *App) Import(dir string) error {
 			return err
 		}
 		target := filepath.Join(a.Root, filepath.FromSlash(relative))
+		// Импорт кладёт открытое содержимое в хранилище: файл вне
+		// фильтра уехал бы в remote как есть.
+		if err := a.requireEncryptedPath(relative); err != nil {
+			return err
+		}
+
 		if err := a.writePlaintext(target, content); err != nil {
 			return err
 		}
@@ -1050,6 +1060,11 @@ func (a *App) secretPaths() ([]string, error) {
 // Отсутствие remote не считается ошибкой: локальный репозиторий без
 // настроенного remote — обычное состояние при первом развёртывании.
 func (a *App) commitAndPush(message string) error {
+	// Коммит забирает всё: файл вне фильтра ушёл бы в remote открытым.
+	if err := a.requireEncryptedSecrets(); err != nil {
+		return err
+	}
+
 	if _, err := a.Runner.Run(Command{Dir: a.Root}, "git", "add", "-A"); err != nil {
 		return err
 	}

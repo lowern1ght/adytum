@@ -58,6 +58,7 @@ func (a *App) doctorChecks() []Check {
 		a.checkTool("age", "age", "--version"),
 		a.checkIdentity(),
 		a.checkFilters(),
+		a.checkFilterCoverage(),
 		a.checkSopsConfig(),
 		a.checkRemote(),
 		a.checkUnlock(),
@@ -151,6 +152,45 @@ func (a *App) checkFilters() Check {
 	}
 	check.OK = true
 	check.Detail = "настроены"
+	return check
+}
+
+// checkFilterCoverage проверяет, что разделы покрыты фильтром
+// шифрования.
+//
+// Правила .gitattributes ведёт владелец: раздел, который забыли
+// внести, уехал бы в remote открытым. Проверка идёт по фактическим
+// файлам разделов — она отвечает на вопрос «что уйдёт в репозиторий»,
+// а не «что написано в правилах».
+func (a *App) checkFilterCoverage() Check {
+	check := Check{Name: "покрытие фильтром"}
+	sections := a.sectionFiles()
+	if len(sections) == 0 {
+		check.OK = true
+		check.Detail = "разделов нет"
+		return check
+	}
+	values, err := a.filterAttributes(sections)
+	if err != nil {
+		check.Detail = err.Error()
+		check.Fix = "проверьте правила .gitattributes"
+		return check
+	}
+	var uncovered []string
+	for _, relative := range sections {
+		value := values[relative]
+		if value == FilterName || value == attrUnset {
+			continue
+		}
+		uncovered = append(uncovered, relative)
+	}
+	if len(uncovered) > 0 {
+		check.Detail = "вне фильтра: " + strings.Join(uncovered, ", ")
+		check.Fix = fmt.Sprintf("добавьте правило в .gitattributes: %s/** filter=%s diff=%s", scopeSection(uncovered[0]), FilterName, FilterName)
+		return check
+	}
+	check.OK = true
+	check.Detail = fmt.Sprintf("файлов: %d, все под фильтром", len(sections))
 	return check
 }
 

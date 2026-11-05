@@ -93,6 +93,11 @@ func (a *App) New(entry string, options NewOptions) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("секрет %s уже существует", relativeTo(a.Root, path))
 	}
+	// Файл должен попасть под шифрование: без правила в
+	// .gitattributes он уедет в remote открытым.
+	if err := a.requireEncryptedPath(relativeTo(a.Root, path)); err != nil {
+		return err
+	}
 	if err := a.writePlaintext(path, []byte(secretTemplate(secretType))); err != nil {
 		return err
 	}

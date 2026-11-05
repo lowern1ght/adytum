@@ -17,6 +17,8 @@ type fakeRunner struct {
 	calls [][]string
 	// envs — окружения выполненных команд.
 	envs [][]string
+	// attrValue — значение атрибута filter для git check-attr.
+	attrValue string
 }
 
 // fakeResponse — ответ на команду.
@@ -35,7 +37,34 @@ func (f *fakeRunner) Run(cmd Command, name string, args ...string) ([]byte, erro
 			return []byte(response.out), response.err
 		}
 	}
+	if strings.Contains(joined, "check-attr") {
+		return []byte(f.checkAttrOutput(args)), nil
+	}
 	return nil, nil
+}
+
+// checkAttrOutput собирает ответ git check-attr в формате -z.
+//
+// Формат: путь\0атрибут\0значение\0 — по тройке на путь.
+func (f *fakeRunner) checkAttrOutput(args []string) string {
+	value := f.attrValue
+	if value == "" {
+		value = FilterName
+	}
+	var builder strings.Builder
+	for index, arg := range args {
+		if arg != "--" {
+			continue
+		}
+		for _, path := range args[index+1:] {
+			builder.WriteString(path)
+			builder.WriteString("\x00filter\x00")
+			builder.WriteString(value)
+			builder.WriteString("\x00")
+		}
+		break
+	}
+	return builder.String()
 }
 
 // TestRunThroughShellExpandsEnvironment проверяет, что команда

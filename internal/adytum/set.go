@@ -128,6 +128,10 @@ func (a *App) setAllKeys(path string, record registry.Entry, options SetOptions)
 			return err
 		}
 	}
+	if err := a.requireEncryptedPath(relativeTo(a.Root, path)); err != nil {
+		return err
+	}
+
 	if err := a.writePlaintext(path, updated); err != nil {
 		return err
 	}
@@ -260,6 +264,10 @@ func (a *App) Unset(entry, key string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.requireEncryptedPath(relativeTo(a.Root, path)); err != nil {
+		return err
+	}
+
 	if err := a.writePlaintext(path, updated); err != nil {
 		return err
 	}
