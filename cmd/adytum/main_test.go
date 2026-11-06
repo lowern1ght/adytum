@@ -116,6 +116,22 @@ func TestRunGetRejectsMultipleTargets(t *testing.T) {
 	}
 }
 
+// TestRunListRequiresEntryForKeys проверяет отказ для --keys без записи.
+//
+// Список без записи лишён смысла: имена ключей есть только у
+// конкретного секрета.
+func TestRunListRequiresEntryForKeys(t *testing.T) {
+	app := newTestApp(t)
+
+	err := runList(app, []string{"--keys"})
+	if err == nil {
+		t.Fatal("ожидался отказ для --keys без записи")
+	}
+	if !strings.Contains(err.Error(), "--keys") {
+		t.Errorf("ошибка = %q, ожидалось упоминание --keys", err.Error())
+	}
+}
+
 // TestRunUnlockRejectsExtraArgument проверяет отказ на лишнем аргументе.
 //
 // unlock ничего не принимает: проигнорированный аргумент выглядит

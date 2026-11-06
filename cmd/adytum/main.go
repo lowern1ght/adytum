@@ -79,7 +79,7 @@ var commandHelpText = map[string]string{
 	"init":             "подготовить склонированный репозиторий: git-фильтры, .gitattributes, .sops.yaml\n               публичные ключи машин подставляются из ~/.adytum/recipients",
 	"sync":             "получить изменения, обновить рабочее дерево, отправить локальные коммиты\n               adytum sync --pull-only   только забрать изменения, ничего не отправляя",
 	"get":              "напечатать расшифрованный секрет\n               adytum get <project>/<service>            весь файл\n               adytum get <project>/<service>.<KEY>      одно значение\n               adytum get --json <project>/<service>     машинночитаемый вывод",
-	"list":             "показать реестр секретов\n               adytum list              таблица записей\n               adytum list <entry>      подробно об одном секрете",
+	"list":             "показать реестр секретов\n               adytum list              таблица записей\n               adytum list <entry>      подробно об одном секрете\n               adytum list <entry> --keys   имена ключей секрета, без значений",
 	"set":              "занести значение в секрет\n               adytum set <project>/<service> <KEY>   один ключ\n               adytum set <project>/<service>         все ключи записи\n               adytum set <project>/<service> <KEY> --stdin   значение из stdin",
 	"unset":            "удалить ключ из секрета\n               adytum unset <project>/<service> <KEY>",
 	"edit":             "открыть секрет в $EDITOR\n               adytum edit <project>/<service>",
@@ -404,8 +404,9 @@ func runNew(app *adytum.App, args []string) error {
 	return app.New(targets[0], options)
 }
 
-// runList выполняет list [<entry>] [--json].
+// runList выполняет list [<entry>] [--keys] [--json].
 func runList(app *adytum.App, args []string) error {
+	keys := false
 	targets := []string{}
 	for _, arg := range args {
 		switch arg {
@@ -413,6 +414,8 @@ func runList(app *adytum.App, args []string) error {
 			app.JSON = true
 		case "--pretty":
 			app.Pretty = true
+		case "--keys":
+			keys = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return fmt.Errorf("неожиданный аргумент %q", arg)
@@ -421,11 +424,19 @@ func runList(app *adytum.App, args []string) error {
 		}
 	}
 	if len(targets) > 1 {
-		return errors.New("указание: adytum list [<entry>]")
+		return errors.New("указание: adytum list [<entry>] [--keys]")
 	}
 	name := ""
 	if len(targets) == 1 {
 		name = targets[0]
+	}
+	if keys {
+		// Список без записи лишён смысла: имена ключей есть только
+		// у конкретного секрета.
+		if name == "" {
+			return errors.New("указание: adytum list <entry> --keys")
+		}
+		return app.ListKeys(name)
 	}
 	return app.List(name)
 }
@@ -667,7 +678,7 @@ func usage(out *os.File) {
   init                      подготовить склонированный репозиторий (фильтры, .sops.yaml)
   sync [--pull-only]        получить изменения, обновить дерево, отправить свои
   get <project>/<service>   напечатать расшифрованный секрет (или один ключ)
-  list [<entry>]            показать реестр секретов
+  list [<entry>] [--keys]   показать реестр секретов (--keys — имена ключей)
   set <p>/<s> [KEY]         занести значение в секрет (--stdin — из stdin)
   unset <p>/<s> <KEY>       удалить ключ из секрета
   edit <project>/<service>  отредактировать секрет в $EDITOR

@@ -75,6 +75,7 @@ adytum get personal/github.GITHUB_TOKEN # одно значение
 ```bash
 adytum list                 # таблица записей
 adytum list personal/github # подробно: описание, ключи, адрес ротации
+adytum list personal/github --keys # имена ключей файла, без значений
 adytum doctor               # сверка реестра, файлов и .sops.yaml
 ```
 
